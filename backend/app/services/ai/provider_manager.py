@@ -91,7 +91,7 @@ class ProviderManager:
     
     async def get_configuration(self) -> Optional[Dict[str, Any]]:
         """
-        Load current configuration
+        Load current configuration from JSON file or fallback to environment settings
         """
         try:
             if self._current_config:
@@ -101,6 +101,26 @@ class ProviderManager:
                 with open(self.config_file, 'r') as f:
                     self._current_config = json.load(f)
                 return self._current_config
+            
+            # Fallback: Use environment variables from settings
+            if settings.GROQ_API_KEY:
+                logger.info("Using GROQ configuration from environment")
+                return {
+                    "provider": "groq",
+                    "api_key": settings.GROQ_API_KEY,
+                    "model": settings.AI_MODEL or "llama-3.3-70b-versatile",
+                    "temperature": 1.0,
+                    "max_completion_tokens": 8192
+                }
+            elif settings.OPENAI_API_KEY:
+                logger.info("Using OpenAI configuration from environment")
+                return {
+                    "provider": "openai",
+                    "api_key": settings.OPENAI_API_KEY,
+                    "model": settings.AI_MODEL or "gpt-4",
+                    "temperature": 1.0,
+                    "max_tokens": 8192
+                }
             
             return None
             

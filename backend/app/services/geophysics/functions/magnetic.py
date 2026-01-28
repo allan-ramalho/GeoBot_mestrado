@@ -1,7 +1,9 @@
 """
 Magnetic Processing Functions
-Core magnetic data processing implementations
+Core magnetic data processing implementations using Harmonica
 Each function is decorated with @register for auto-discovery
+
+UPDATED: Now using Harmonica (Fatiando a Terra) for scientifically validated methods
 """
 
 import numpy as np
@@ -10,6 +12,7 @@ from typing import Dict, Any, Tuple
 import logging
 
 from app.services.geophysics.function_registry import register
+from app.services.geophysics.harmonica_integration import HarmonicaWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,10 @@ def reduction_to_pole(
     declination: float
 ) -> Dict[str, Any]:
     """
-    Reduction to Pole transformation
+    Reduction to Pole transformation using Harmonica
+    
+    Uses Harmonica (Fatiando a Terra) for scientifically validated RTP.
+    Falls back to manual implementation if Harmonica unavailable.
     
     Args:
         data: Dictionary with 'z' (magnetic field), 'x', 'y' coordinates
@@ -73,47 +79,64 @@ def reduction_to_pole(
     Returns:
         Processed data with RTP applied
     """
-    logger.info(f"🧲 RTP: I={inclination}°, D={declination}°")
+    logger.info(f"🧲 RTP (Harmonica): I={inclination}°, D={declination}°")
     
-    z = data['z']
-    ny, nx = z.shape
-    
-    # FFT
-    Z = fft.fft2(z)
-    
-    # Frequency domain
-    kx = fft.fftfreq(nx, d=1.0)
-    ky = fft.fftfreq(ny, d=1.0)
-    KX, KY = np.meshgrid(kx, ky)
-    K = np.sqrt(KX**2 + KY**2)
-    
-    # Convert angles to radians
-    inc_rad = np.deg2rad(inclination)
-    dec_rad = np.deg2rad(declination)
-    
-    # RTP operator
-    theta = np.arctan2(KY, KX)
-    L = (K * np.sin(inc_rad) + 
-         1j * (KX * np.cos(inc_rad) * np.cos(dec_rad) + 
-               KY * np.cos(inc_rad) * np.sin(dec_rad)))
-    
-    # Avoid division by zero
-    L[K == 0] = 1.0
-    
-    # Apply RTP operator
-    Z_rtp = Z / (L + 1e-10)
-    
-    # Inverse FFT
-    z_rtp = fft.ifft2(Z_rtp).real
-    
-    result = data.copy()
-    result['z'] = z_rtp
-    result['processing_history'] = data.get('processing_history', []) + [
-        f"RTP: I={inclination}°, D={declination}°"
-    ]
-    
-    logger.info("✅ RTP completed")
-    return result
+    try:
+        # Use Harmonica wrapper (validated implementation)
+        z_rtp = HarmonicaWrapper.reduction_to_pole(data, inclination, declination)
+        
+        result = data.copy()
+        result['z'] = z_rtp
+        result['processing_history'] = data.get('processing_history', []) + [
+            f"RTP (Harmonica): I={inclination}°, D={declination}°"
+        ]
+        
+        logger.info("✅ RTP completed using Harmonica")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Harmonica RTP failed: {e}")
+        logger.warning("⚠️ Falling back to manual RTP implementation")
+        
+        # Manual fallback implementation
+        z = data['z']
+        ny, nx = z.shape
+        
+        # FFT
+        Z = fft.fft2(z)
+        
+        # Frequency domain
+        kx = fft.fftfreq(nx, d=1.0)
+        ky = fft.fftfreq(ny, d=1.0)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+        
+        # Convert angles to radians
+        inc_rad = np.deg2rad(inclination)
+        dec_rad = np.deg2rad(declination)
+        
+        # RTP operator
+        L = (K * np.sin(inc_rad) + 
+             1j * (KX * np.cos(inc_rad) * np.cos(dec_rad) + 
+                   KY * np.cos(inc_rad) * np.sin(dec_rad)))
+        
+        # Avoid division by zero
+        L[K == 0] = 1.0
+        
+        # Apply RTP operator
+        Z_rtp = Z / (L + 1e-10)
+        
+        # Inverse FFT
+        z_rtp = fft.ifft2(Z_rtp).real
+        
+        result = data.copy()
+        result['z'] = z_rtp
+        result['processing_history'] = data.get('processing_history', []) + [
+            f"RTP (Manual Fallback): I={inclination}°, D={declination}°"
+        ]
+        
+        logger.info("✅ RTP completed (manual)")
+        return result
 
 
 @register(
@@ -158,7 +181,10 @@ def upward_continuation(
     height: float
 ) -> Dict[str, Any]:
     """
-    Upward continuation
+    Upward continuation using Harmonica
+    
+    Uses Harmonica (Fatiando a Terra) for scientifically validated continuation.
+    Falls back to manual implementation if needed.
     
     Args:
         data: Dictionary with field data
@@ -167,40 +193,58 @@ def upward_continuation(
     Returns:
         Continued field data
     """
-    logger.info(f"⬆️ Upward continuation: h={height}m")
+    logger.info(f"⬆️ Upward continuation (Harmonica): h={height}m")
     
-    z = data['z']
-    ny, nx = z.shape
-    
-    # FFT
-    Z = fft.fft2(z)
-    
-    # Wavenumber
-    dx = np.mean(np.diff(data['x']))
-    dy = np.mean(np.diff(data['y']))
-    
-    kx = fft.fftfreq(nx, d=dx)
-    ky = fft.fftfreq(ny, d=dy)
-    KX, KY = np.meshgrid(kx, ky)
-    K = np.sqrt(KX**2 + KY**2)
-    
-    # Upward continuation operator
-    operator = np.exp(-2 * np.pi * K * height)
-    
-    # Apply
-    Z_cont = Z * operator
-    
-    # Inverse FFT
-    z_cont = fft.ifft2(Z_cont).real
-    
-    result = data.copy()
-    result['z'] = z_cont
-    result['processing_history'] = data.get('processing_history', []) + [
-        f"Upward Continuation: {height}m"
-    ]
-    
-    logger.info("✅ Upward continuation completed")
-    return result
+    try:
+        # Use Harmonica wrapper
+        z_cont = HarmonicaWrapper.upward_continuation(data, height)
+        
+        result = data.copy()
+        result['z'] = z_cont
+        result['processing_history'] = data.get('processing_history', []) + [
+            f"Upward Continuation (Harmonica): {height}m"
+        ]
+        
+        logger.info("✅ Upward continuation completed using Harmonica")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Harmonica upward continuation failed: {e}")
+        logger.warning("⚠️ Falling back to manual implementation")
+        
+        # Manual fallback
+        z = data['z']
+        ny, nx = z.shape
+        
+        # FFT
+        Z = fft.fft2(z)
+        
+        # Wavenumber
+        dx = np.mean(np.diff(data['x'])) if data['x'].ndim == 1 else np.mean(np.diff(data['x'][0, :]))
+        dy = np.mean(np.diff(data['y'])) if data['y'].ndim == 1 else np.mean(np.diff(data['y'][:, 0]))
+        
+        kx = fft.fftfreq(nx, d=dx)
+        ky = fft.fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+        
+        # Upward continuation operator
+        operator = np.exp(-2 * np.pi * K * height)
+        
+        # Apply
+        Z_cont = Z * operator
+        
+        # Inverse FFT
+        z_cont = fft.ifft2(Z_cont).real
+        
+        result = data.copy()
+        result['z'] = z_cont
+        result['processing_history'] = data.get('processing_history', []) + [
+            f"Upward Continuation (Manual): {height}m"
+        ]
+        
+        logger.info("✅ Upward continuation completed (manual)")
+        return result
 
 
 @register(

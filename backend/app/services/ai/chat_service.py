@@ -229,63 +229,73 @@ Current Context:
         functions: Optional[List[Dict]],
         config: Dict
     ) -> Dict[str, Any]:
-        """Call Groq API with fallback support"""
+        """
+        Call Groq API using official SDK with streaming support
         
-        models = [config["model"]] + [
+        Uses the official Groq Python SDK for reliable API access.
+        Supports streaming and reasoning_effort parameter.
+        """
+        try:
+            from groq import Groq
+        except ImportError:
+            raise RuntimeError("groq package required. Install with: pip install groq")
+        
+        models = [config.get("model", "openai/gpt-oss-120b")] + [
             "openai/gpt-oss-120b",
             "llama-3.3-70b-versatile",
             "llama-3.1-70b-versatile",
             "mixtral-8x7b-32768"
         ]
         
+        # Initialize Groq client
+        client = Groq(api_key=config['api_key'])
+        
+        # Prepare messages
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": message})
+        
         for model in models:
             try:
-                async with httpx.AsyncClient() as client:
-                    messages = [{"role": "system", "content": system_prompt}]
-                    messages.extend(history)
-                    messages.append({"role": "user", "content": message})
-                    
-                    payload = {
-                        "model": model,
-                        "messages": messages,
-                        "temperature": config.get("temperature", 0.7),
-                        "max_tokens": config.get("max_tokens", 4096)
+                # Call with official SDK (non-streaming for now)
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=config.get("temperature", 1.0),
+                    max_completion_tokens=config.get("max_completion_tokens", 8192),
+                    top_p=config.get("top_p", 1.0),
+                    reasoning_effort=config.get("reasoning_effort", "medium"),
+                    stream=False,  # Can be enabled for streaming
+                    stop=None
+                )
+                
+                # Extract response
+                choice = completion.choices[0]
+                result = {"content": choice.message.content}
+                
+                # Handle function calls if supported
+                if hasattr(choice.message, 'function_call') and choice.message.function_call:
+                    result["function_call"] = {
+                        "name": choice.message.function_call.name,
+                        "arguments": choice.message.function_call.arguments
                     }
-                    
-                    if functions:
-                        payload["functions"] = functions
-                        payload["function_call"] = "auto"
-                    
-                    response = await client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {config['api_key']}",
-                            "Content-Type": "application/json"
-                        },
-                        json=payload,
-                        timeout=60.0
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        choice = data["choices"][0]
-                        
-                        result = {"content": choice["message"]["content"]}
-                        
-                        if choice["message"].get("function_call"):
-                            result["function_call"] = choice["message"]["function_call"]
-                        
-                        return result
-                    elif response.status_code == 429:
-                        logger.warning(f"⚠️ Rate limit for {model}, trying fallback...")
-                        continue
-                    else:
-                        raise Exception(f"API error: {response.status_code} - {response.text}")
-                        
+                
+                logger.info(f"✅ Groq response received from model: {model}")
+                return result
+                
             except Exception as e:
-                logger.error(f"Error with model {model}: {e}")
+                error_msg = str(e)
+                logger.error(f"Error with Groq model {model}: {error_msg}")
+                
+                # Check for rate limit
+                if "rate_limit" in error_msg.lower() or "429" in error_msg:
+                    logger.warning(f"⚠️ Rate limit for {model}, trying fallback...")
+                    continue
+                
+                # If last model, raise error
                 if model == models[-1]:
-                    raise
+                    raise Exception(f"All Groq models failed. Last error: {error_msg}")
+                
                 continue
         
         raise Exception("All Groq models failed")

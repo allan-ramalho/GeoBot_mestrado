@@ -79,10 +79,12 @@ class FunctionRegistry:
         """List all registered functions"""
         return [
             {
+                "id": info["name"],  # Add id field for API compatibility
                 "name": info["name"],
                 "description": info["description"],
                 "keywords": info["keywords"],
-                "parameters": info["parameters"]
+                "parameters": info["parameters"],
+                "category": info.get("category", "general")  # Add category if present
             }
             for info in self.functions.values()
         ]
@@ -183,8 +185,12 @@ def register(
     name: str,
     description: str,
     keywords: List[str],
-    parameters: Dict[str, Any],
-    examples: Optional[List[str]] = None
+    parameters: Dict[str, Any] = None,
+    examples: Optional[List[str]] = None,
+    best_practices: Optional[List[str]] = None,
+    references: Optional[List[str]] = None,
+    category: Optional[str] = None,
+    **kwargs  # Accept any additional keyword arguments
 ):
     """
     Decorator for registering functions
@@ -194,12 +200,38 @@ def register(
             name="reduction_to_pole",
             description="Apply reduction to pole transformation",
             keywords=["RTP", "reduction", "pole", "magnetic"],
-            parameters={"inclination": {"type": "number"}, "declination": {"type": "number"}}
+            parameters={"inclination": {"type": "number"}, "declination": {"type": "number"}},
+            best_practices=["Use for magnetic data at low latitudes"],
+            references=["Baranov (1957). A new method for interpretation"],
+            category="magnetic"
         )
         def reduction_to_pole(data, inclination, declination):
             ...
     """
+    # Set default for parameters if None
+    if parameters is None:
+        parameters = {}
+        
     def decorator(func: Callable) -> Callable:
+        # Store additional metadata
+        func_metadata = {
+            "name": name,
+            "description": description,
+            "keywords": keywords,
+            "parameters": parameters,
+            "examples": examples
+        }
+        
+        if best_practices:
+            func_metadata["best_practices"] = best_practices
+        if references:
+            func_metadata["references"] = references
+        if category:
+            func_metadata["category"] = category
+        
+        # Store any additional kwargs in metadata
+        func_metadata.update(kwargs)
+            
         _registry.register_function(
             name=name,
             func=func,

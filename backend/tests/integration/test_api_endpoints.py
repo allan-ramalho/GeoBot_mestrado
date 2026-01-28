@@ -179,12 +179,12 @@ class TestRAGEndpoints:
     @pytest.mark.ai
     async def test_query_with_rag(self, async_client: AsyncClient, skip_if_no_api_key):
         """Test query with RAG"""
-        skip_if_no_api_key("openai")
+        skip_if_no_api_key("groq")
         
         payload = {
             "query": "What is magnetic reduction to pole?",
             "use_rag": True,
-            "provider": "openai"
+            "provider": "groq"
         }
         
         response = await async_client.post("/api/chat/query", json=payload)
@@ -209,7 +209,7 @@ class TestChatWebSocket:
             websocket.send_json({
                 "type": "message",
                 "content": "Hello",
-                "provider": "openai"
+                "provider": "groq"
             })
             
             # Receive response
@@ -221,13 +221,13 @@ class TestChatWebSocket:
     @pytest.mark.ai
     async def test_websocket_streaming(self, client: TestClient, skip_if_no_api_key):
         """Test WebSocket streaming response"""
-        skip_if_no_api_key("openai")
+        skip_if_no_api_key("groq")
         
         with client.websocket_connect("/ws/chat") as websocket:
             websocket.send_json({
                 "type": "message",
                 "content": "What is RTP?",
-                "provider": "openai",
+                "provider": "groq",
                 "stream": True
             })
             

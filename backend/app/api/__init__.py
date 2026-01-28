@@ -10,7 +10,9 @@ from app.api.endpoints import (
     projects,
     processing,
     data,
-    chat
+    chat,
+    workflows,
+    rag
 )
 
 api_router = APIRouter()
@@ -22,3 +24,5 @@ api_router.include_router(projects.router, prefix="/projects", tags=["Projects"]
 api_router.include_router(processing.router, prefix="/processing", tags=["Processing"])
 api_router.include_router(data.router, prefix="/data", tags=["Data"])
 api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
+api_router.include_router(workflows.router, prefix="/workflows", tags=["Workflows"])
+api_router.include_router(rag.router, prefix="/rag", tags=["RAG"])

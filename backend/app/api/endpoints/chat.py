@@ -40,6 +40,12 @@ class ChatResponse(BaseModel):
     language: str = "en"
 
 
+class ConversationCreate(BaseModel):
+    """Create conversation request"""
+    title: str
+    provider: Optional[str] = "openai"
+
+
 @router.post("/message")
 async def send_message(request: ChatRequest):
     """
@@ -193,6 +199,60 @@ async def get_conversation(conversation_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/history")
+async def get_chat_history():
+    """
+    Get list of all conversations
+    """
+    try:
+        # For now, return empty list (no persistence implemented)
+        # TODO: Implement conversation persistence
+        return []
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get chat history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/conversations")
+async def create_conversation(request: ConversationCreate):
+    """
+    Create a new conversation
+    """
+    try:
+        import uuid
+        conversation_id = str(uuid.uuid4())
+        
+        # For now, just return the created conversation
+        # TODO: Implement conversation persistence
+        return {
+            "id": conversation_id,
+            "title": request.title,
+            "provider": request.provider,
+            "created_at": None  # Will be added when persistence is implemented
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to create conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """
+    Get conversation history
+    """
+    try:
+        chat_service = ChatService()
+        history = await chat_service.get_conversation_history(conversation_id)
+        
+        return {"conversation_id": conversation_id, "messages": history}
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str):
     """
@@ -226,4 +286,41 @@ async def search_knowledge_base(query: str, top_k: int = 5):
         
     except Exception as e:
         logger.error(f"❌ Knowledge base search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class QueryRequest(BaseModel):
+    """Query with RAG request"""
+    query: str
+    use_rag: bool = True
+    provider: Optional[str] = "openai"
+
+
+@router.post("/query")
+async def query_with_rag(request: QueryRequest):
+    """
+    Query with RAG support.
+    Returns AI response with citations.
+    
+    This is a mock implementation. In a real scenario, this would:
+    1. Search relevant documents using RAG
+    2. Generate response using LLM with context
+    3. Return response with citations
+    """
+    try:
+        # TODO: Implement actual RAG query
+        # For now, return mock response with citations
+        return {
+            "message": "Mock response about magnetic reduction to pole",
+            "citations": [
+                {
+                    "source": "geophysics_manual.pdf",
+                    "page": 1,
+                    "text": "Reduction to pole is a technique..."
+                }
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ RAG query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

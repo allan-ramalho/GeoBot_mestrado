@@ -41,7 +41,12 @@ def client() -> Generator[TestClient, None, None]:
 @pytest.fixture
 async def async_client() -> AsyncGenerator[AsyncClient, None]:
     """Asynchronous test client"""
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    from httpx import ASGITransport
+    
+    async with AsyncClient(
+        transport=ASGITransport(app=app), 
+        base_url="http://test"
+    ) as ac:
         yield ac
 
 
@@ -179,15 +184,15 @@ def mock_supabase_client():
 def reset_settings():
     """Reset settings before each test"""
     # Save original values
-    original_env = settings.ENVIRONMENT
+    original_debug = settings.DEBUG
     
     # Set test environment
-    settings.ENVIRONMENT = "test"
+    settings.DEBUG = True  # Enable debug for tests
     
     yield
     
     # Restore
-    settings.ENVIRONMENT = original_env
+    settings.DEBUG = original_debug
 
 
 # ============================================================================
@@ -202,6 +207,7 @@ def skip_if_no_api_key():
             "openai": settings.OPENAI_API_KEY,
             "anthropic": settings.ANTHROPIC_API_KEY,
             "google": settings.GOOGLE_API_KEY,
+            "groq": settings.GROQ_API_KEY,
         }
         if not key_map.get(provider):
             pytest.skip(f"{provider} API key not configured")

@@ -36,10 +36,14 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = Field(default=None, env="DATABASE_URL")
     
     # AI Providers Configuration
-    # These are loaded dynamically from user configuration
-    # Not stored in environment for security
-    AI_PROVIDER: Optional[str] = None  # groq, openai, claude, gemini
-    AI_MODEL: Optional[str] = None
+    AI_PROVIDER: Optional[str] = Field(default="groq", env="AI_PROVIDER")
+    AI_MODEL: Optional[str] = Field(default="llama-3.3-70b-versatile", env="AI_MODEL")
+    
+    # AI Provider API Keys
+    OPENAI_API_KEY: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
+    ANTHROPIC_API_KEY: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
+    GOOGLE_API_KEY: Optional[str] = Field(default=None, env="GOOGLE_API_KEY")
+    GROQ_API_KEY: Optional[str] = Field(default=None, env="GROQ_API_KEY")
     
     # RAG Configuration
     EMBEDDING_MODEL: str = Field(

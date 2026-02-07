@@ -1,0 +1,20 @@
+# GeoBot - PPGDot-UFF Theme Configuration
+# Tema inspirado no site do Programa de Pós-Graduação em Dinâmica dos Oceanos e da Terra
+
+[theme]
+# Cores PPGDot-UFF (azuis oceânicos)
+primaryColor = "#0066a1"          # Azul médio PPGDot
+backgroundColor = "#e8e8e8"       # Cinza claro
+secondaryBackgroundColor = "#f0f0f0"  # Cinza muito claro
+textColor = "#003d5c"             # Azul escuro PPGDot
+font = "sans serif"               # Roboto será carregado via CSS
+
+[server]
+headless = true
+port = 8501
+enableCORS = false
+enableXsrfProtection = true
+runOnSave = true
+
+[browser]
+gatherUsageStats = false

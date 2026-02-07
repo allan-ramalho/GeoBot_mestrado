@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+title: "GeoBot - Agente de IA para Processamento Geofísico"
+message: "Se você usar este software em sua pesquisa, por favor cite-o usando os metadados deste arquivo."
+type: software
+authors:
+  - family-names: "Ramalho"
+    given-names: "Allan"
+    email: "allansoares@id.uff.br"
+    affiliation: "Universidade Federal Fluminense"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+  - family-names: "Bijani"
+    given-names: "Rodrigo"
+    email: "rodrigobijani@id.uff.br"
+    affiliation: "Universidade Federal Fluminense"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/allan-ramalho/GeoBot_mestrado"
+url: "https://github.com/allan-ramalho/GeoBot_mestrado"
+abstract: "GeoBot é um assistente conversacional inteligente com aceleração GPU para processar e analisar dados geofísicos de gravimetria e magnetometria. Combina processamento geofísico clássico com inteligência artificial generativa, oferecendo citações automáticas de papers científicos, visualizações interativas e speedup de 10-50x em operações FFT através de NVIDIA CUDA."
+keywords:
+  - geophysics
+  - gravity
+  - magnetometry
+  - GPU acceleration
+  - CUDA
+  - PyTorch
+  - AI assistant
+  - RAG
+  - conversational AI
+  - scientific computing
+license: MIT
+version: 1.0.0
+date-released: 2026-02-07

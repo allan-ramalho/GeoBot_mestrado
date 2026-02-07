@@ -1,53 +1,225 @@
-# Python
+# ============================================================================
+# GeoBot .gitignore
+# ============================================================================
+
+# ============================================================================
+# PYTHON
+# ============================================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ============================================================================
+# VIRTUAL ENVIRONMENT
+# ============================================================================
 venv/
 env/
 ENV/
-.venv
-pip-log.txt
-pip-delete-this-directory.txt
-.pytest_cache/
-.coverage
-htmlcov/
-*.egg-info/
-dist/
-build/
+env.bak/
+venv.bak/
+.venv/
 
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Build outputs
-frontend/dist/
-frontend/dist-electron/
-backend/dist/
-*.exe
-*.AppImage
-*.deb
-
-# IDE
+# ============================================================================
+# IDE & EDITORS
+# ============================================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
 
-# Environment
+# ============================================================================
+# LOGS
+# ============================================================================
+*.log
+geobot.log
+*.log.*
+logs/
+
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 .env
 .env.local
 .env.*.local
+.env.production
 
-# OS
-.DS_Store
+# ============================================================================
+# CHROMADB / RAG DATABASE
+# ============================================================================
+rag_database/chromadb/
+rag_database/*.db
+rag_database/*.sqlite
+rag_database/*.sqlite3
+chroma_db/
+
+# ============================================================================
+# STREAMLIT
+# ============================================================================
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# ============================================================================
+# JUPYTER NOTEBOOK
+# ============================================================================
+.ipynb_checkpoints
+*.ipynb
+
+# ============================================================================
+# DATA FILES
+# ============================================================================
+# Ignora dados do usuário, mas mantém exemplos
+*.csv
+*.xlsx
+*.xls
+*.txt
+!example_data/*.csv
+!example_data/*.xlsx
+!example_data/*.txt
+!requirements.txt
+!LICENSE
+
+# Formatos geofísicos
+*.grd
+*.nc
+*.sgy
+*.segy
+
+# ============================================================================
+# TEMPORARY FILES
+# ============================================================================
+*.tmp
+*.bak
+*.swp
+*~.nib
+.cache/
+temp/
+tmp/
+
+# ============================================================================
+# OS SPECIFIC
+# ============================================================================
+# Windows
 Thumbs.db
-desktop.ini
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+
+# ============================================================================
+# TEST COVERAGE
+# ============================================================================
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# ============================================================================
+# TRANSLATIONS
+# ============================================================================
+*.mo
+*.pot
+
+# ============================================================================
+# COMPILED FILES
+# ============================================================================
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.dylib
+
+# ============================================================================
+# BACKUP FILES
+# ============================================================================
+*.bak
+*.backup
+*~
+
+# ============================================================================
+# PYTORCH / MODELS
+# ============================================================================
+*.pth
+*.pt
+models/
+checkpoints/
+
+# ============================================================================
+# DOCUMENTAÇÃO GERADA
+# ============================================================================
+docs/_build/
+site/
+
+# ============================================================================
+# ARQUIVOS ESPECÍFICOS DO PROJETO
+# ============================================================================
+# Arquivos de teste temporários
+test_*.py
+debug_*.py
+
+# Outputs de processamento
+output/
+results/
+processed_data/
+
+# Git
+.git/
+*.backup
+*.old
+*_backup.*
+
+# Large files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Scientific data formats (não versionados por padrão)
+*.grd
+*.nc
+*.hdf5
+*.mat
+
+# Documentation builds
+docs/_build/
 
 # Data
 data/

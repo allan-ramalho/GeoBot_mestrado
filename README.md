@@ -500,61 +500,7 @@ No método detect_processing_command, inclua palavras-chave para a nova função
 
 ## 9) Catálogo de possibilidades (para implementar)
 
-Abaixo está uma lista ampla de possibilidades de funções de processamento e interpretação para dados potenciais para implementar
-### 9.1) Pré-processamento e QC
-- Detecção e remoção de outliers
-- Destrend regional (polinomial, spline)
-- Normalização e equalização
-- Remoção de ruído com wavelets
-- Interpolação adaptativa e kriging
-
-### 9.2) Gravimetria
-- Correção de latitude
-- Correção de deriva instrumental
-- Correção de maré
-- Correção free-air
-- Correção Bouguer simples e completa
-- Correção de terreno (prismas ou DEM)
-- Anomalia isostática
-- Separação regional/residual
-
-### 9.3) Magnetometria
-- Correção diurna
-- Remoção do IGRF
-- Redução ao polo (RTP)
-- Redução ao equador (RTE)
-- Pseudo-gravidade
-- Desmagnetização induzida
-
-### 9.4) Filtros e transformações
-- Passa-baixa, passa-alta, passa-banda
-- Filtros direcionais
-- Continuação ascendente/descendente
-- Derivadas verticais (1ª, 2ª)
-- Derivadas horizontais (THD)
-
-### 9.5) Atributos e realces
-- Sinal analítico
-- Tilt angle
-- Theta map
-- Curvaturas e segunda derivada
-
-### 9.6) Profundidade e fonte
-- Deconvolução de Euler
-- Espectro de potência (depth estimation)
-- Métodos de Peters / Half-slope
-- Local wavenumber
-
-### 9.7) Interpretação geológica
-- Mapeamento automático de lineamentos
-- Estimativa de contatos e falhas
-- Delineamento de bacias sedimentares
-- Identificação de corpos intrusivos
-
-### 9.8) Modelagem e inversão
-- Modelagem 2D/3D de prismas
-- Inversão com regularização (Tikhonov)
-- Inversão conjunta grav+mag
+No momento, todos os itens listados anteriormente já estão implementados.
 
 ## 10) Boas práticas de interpretação
 

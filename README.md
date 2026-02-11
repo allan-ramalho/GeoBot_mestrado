@@ -9,9 +9,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Groq](https://img.shields.io/badge/LLM-Groq_API-7C3AED)](https://groq.com/)
 
-**Assistente conversacional inteligente com aceleração GPU para processar e analisar dados geofísicos de gravimetria e magnetometria**
+**AI Assistant com aceleração GPU para análise e processamento de dados geofísicos de gravimetria e magnetometria**
 
-[🚀 Instalação](#-instalação-rápida) • [📖 Documentação](#-documentação) • [🎯 Recursos](#-recursos) • [⚡ GPU](#-aceleração-gpu) • [🤝 Contribuir](#-como-contribuir)
+[🚀 Instalação](#-instalação-rápida) • [📖 Documentação](#-documentação) • [🎯 Recursos](#-recursos) • [⚡ GPU](#-aceleração-gpu)
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ## ✨ O que é o GeoBot?
 
-GeoBot é um agente de IA que combina **processamento geofísico clássico** com **inteligência artificial generativa** para tornar a análise de dados de métodos potenciais mais acessível e eficiente.
+GeoBot é um agente de IA que combina **processamento geofísico** com **inteligência artificial generativa** para tornar a análise de dados de métodos potenciais mais acessível e eficiente, possibilitando ao usuário otimização de tempo e foco maior em atividados de maior relevância.
 
 ### 🎯 Principais Funcionalidades
 
@@ -30,7 +30,7 @@ GeoBot é um agente de IA que combina **processamento geofísico clássico** com
 | 🔬 **Processamento Geofísico** | Biblioteca completa: Bouguer, RTP, derivadas, continuação, filtros, sinal analítico, tilt angle |
 | 📊 **Visualizações Interativas** | Mapas 2D/3D com Plotly, comparações antes/depois, histogramas, estatísticas |
 | 🚀 **Aceleração GPU** | Suporte automático para NVIDIA CUDA e Apple Silicon (M1/M2) |
-| 🔌 **Extensível** | Sistema de registro de funções permite adicionar novos processamentos facilmente |
+| 🔌 **Extensível** | Sistema de registro de funções permite adicionar novos processamentos |
 
 ---
 
@@ -55,40 +55,38 @@ notepad .env
 .\INICIAR_GEOBOT.bat
 ```
 
-A aplicação abrirá automaticamente no navegador em `http://localhost:8501` 🎉
-allan-ramalho/GeoBot_mestrado.git
-cd GeoBot_mestrado
+A aplicação abrirá automaticamente no navegador em `http://localhost:8501` 
 
-# 2. Crie ambiente virtual Python 3.11+
-python3.11 -m venv venv
+## 🚀 Instalação manual
+### 1. Crie ambiente virtual Python
+```powershell
+python -m venv venv
 source venv/bin/activate
-
-# 3. Instale dependências
-pip install -r requirements.txt
-
-# 4. Instale PyTorch com suporte GPU
-# Para NVIDIA CUDA 12.4 (Recomendado - 10-50x mais rápido!):
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
-
-# Para Apple Silicon (M1/M2):
-pip install torch torchvision
-
-# 5. Configure suas chaves de API
-cp .env.example .env
-nano .env  # ou use seu editor preferido
-
-# 6 install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-# Para Apple Silicon (M1/M2):
-pip install torch torchvision
-
-# 5. Execute o GeoBot
-streamlit run geobot.py
 ```
 
+### 2. Instale dependências
+```powershell
+pip install -r requirements.txt
+```
+
+### 3. Instale PyTorch com suporte GPU
+```powershell
+# Para NVIDIA CUDA 12.4 (Recomendado, porém verifique sua versão CUDA):
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+```
+
+### 4. Configure suas chaves de API
+```powershell
+cp .env.example .env
+```
+
+### 5. Execute o GeoBot
+```powershell
+streamlit run geobot.py
+```
 ---
 
-## 🎓 Primeiros Passos (Para Iniciantes)
+## 🎓 Primeiros Passos
 
 ### 1️⃣ Configure sua API Key da Groq
 
@@ -99,15 +97,12 @@ O GeoBot usa a **Groq API** (gratuita!) para conversação com IA:
 3. Gere uma nova API Key
 4. Cole a chave na interface do GeoBot
 
-> 💡 **Dica:** A Groq oferece modelos LLM de última geração gratuitamente!
-
 ### 2️⃣ Carregue seus Dados
 
 O GeoBot aceita diversos formatos:
 
 - **CSV/TXT:** Colunas com X, Y (coordenadas) e valor (gravidade/magnetometria)
 - **Excel:** Arquivos `.xlsx` ou `.xls`
-- **Formatos geofísicos:** Grids regulares
 
 **Exemplo de CSV:**
 ```csv
@@ -128,17 +123,15 @@ Experimente comandos como:
 "Faça um histograma da gravidade"
 "Qual a diferença entre redução ao polo e sinal analítico?"
 ```
-
 ---
 
 ## 📖 Documentação
 
-| Documento | Descrição |
-|-----------|-----------|
-| **[USER_GUIDE.md](USER_GUIDE.md)** | 📘 Manual do usuário com exemplos práticos |
-| **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** | 🛠️ Guia para desenvolvedores - como adicionar novas funções |
-| **[CONTRIBUTING.md](CONTRIBUTING.md)** | 🤝 Como contribuir para o projeto |
-| **[DOCUMENTACAO.md](DOCUMENTACAO.md)** | 📚 Documentação técnica completa (original) |
+- Guia de uso para não programadores
+- Configuração e manutenção
+- Como adicionar novas funções de processamento
+- Como atualizar e escalar o RAG
+- Boas práticas de interpretação geofísica
 
 ---
 
@@ -147,10 +140,10 @@ Experimente comandos como:
 ### Exemplo 1: Correção de Bouguer
 
 ```
-Você: "Carregue os dados de gravidade"
+Usuário : "Carregue os dados de gravidade"
 [Arraste arquivo CSV na sidebar]
 
-Você: "Aplique correção de Bouguer com densidade 2.67 g/cm³"
+Usuário: "Aplique correção de Bouguer com densidade 2.67 g/cm³"
 
 GeoBot: "✅ Correção de Bouguer aplicada!
 - Densidade: 2670 kg/m³
@@ -165,7 +158,7 @@ BLAKELY, R. J. Potential Theory in Gravity and Magnetic Applications..."
 ### Exemplo 2: Pipeline de Processamento Magnético
 
 ```
-Você: "Faça redução ao polo seguida de derivada vertical"
+Usuário: "Faça redução ao polo seguida de derivada vertical"
 
 GeoBot: "✅ Pipeline executado com sucesso!
 
@@ -195,9 +188,9 @@ GeoBot: "✅ Pipeline executado com sucesso!
 └────────────────┬────────────────────────────┘
                  │
 ┌────────────────┴────────────────────────────┐
-│        RAG Engine (ChromaDB)                │
+│      RAG Engine (ChromaDB/Supabase)         │
 │  • Embeddings: all-MiniLM-L6-v2             │
-│  • Vector store persistente                 │
+│  • Vetor local ou remoto (pgvector)         │
 │  • Citações científicas automáticas         │
 └────────────────┬────────────────────────────┘
                  │
@@ -239,20 +232,14 @@ O GeoBot detecta automaticamente GPUs disponíveis:
 | GPU | Suporte | Ganho de Performance |
 |-----|---------|----------------------|
 | **NVIDIA** (CUDA) | ✅ Automático | ~10-50x mais rápido |
-| **Apple Silicon** (M1/M2) | ✅ Automático | ~5-20x mais rápido |
 | **CPU** (Fallback) | ✅ Sempre funciona | Performance padrão |
 
 Para verificar se sua GPU está sendo usada, veja o log de inicialização:
 
 ```
-🚀 GPU NVIDIA detectada: NVIDIA GeForce RTX 3080
+🚀 GPU NVIDIA detectada: NVIDIA GeForce RTX 3050 Ti
+✅ Módulo de otimizações GPU ativado
 ```
-
----
-
-## ⚡ Aceleração GPU
-
-O GeoBot possui suporte **automático** para aceleração GPU via NVIDIA CUDA e Apple Silicon (MPS), proporcionando **10-50x de speedup** em operações FFT!
 
 ### 🚀 Performance Comparativa
 
@@ -264,28 +251,6 @@ O GeoBot possui suporte **automático** para aceleração GPU via NVIDIA CUDA e 
 | **Sinal Analítico** | 380ms | 24ms | **16x** ⚡ |
 | **Embeddings (RAG)** | 850ms | 85ms | **10x** ⚡ |
 | **Grid Cache** | 2000ms | 2ms | **1000x** 💾 |
-
-### 📦 Instalação GPU
-
-**NVIDIA (Windows/Linux):**
-```bash
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
-```
-
-**Apple Silicon (M1/M2/M3):**
-```bash
-pip install torch torchvision  # MPS é automático no PyTorch 2.x
-```
-
-### ✅ Verificação
-
-O GeoBot detecta automaticamente sua GPU ao iniciar:
-```
-🚀 GPU NVIDIA detectada: NVIDIA GeForce RTX 3050 Ti
-✅ Módulo de otimizações GPU ativado
-```
-
-Para mais detalhes, veja [OTIMIZACOES_GPU.md](OTIMIZACOES_GPU.md).
 
 ---
 
@@ -304,19 +269,9 @@ Para mais detalhes, veja [OTIMIZACOES_GPU.md](OTIMIZACOES_GPU.md).
 
 ---
 
-## 🤝 Como Contribuir
+### Adicionando Novas Funções
 
-Adoramos contribuições! Veja como você pode ajudar:
-
-1. **🐛 Reportar Bugs:** Abra uma [issue](https://github.com/allan-ramalho/GeoBot_mestrado/issues) detalhando o problema
-2. **💡 Sugerir Funcionalidades:** Compartilhe suas ideias nas issues
-3. **🔧 Enviar Pull Requests:** Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para o processo
-4. **📚 Melhorar Documentação:** Correções e melhorias são sempre bem-vindas
-5. **⭐ Dar uma Estrela:** Se o projeto te ajudou, deixe uma estrela no GitHub!
-
-### Adicionando Novos Processamentos
-
-É muito fácil! Veja o guia completo em [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
+Veja a seção **"Criando novas funções de processamento"** neste README para um passo a passo completo.
 
 **Exemplo rápido:**
 
@@ -351,6 +306,286 @@ def meu_filtro(data: GeophysicalData, param: float) -> ProcessingResult:
         method_name="meu_filtro"
     )
 ```
+---
+
+# 📚 Documentação de Desenvolvimento
+
+Esta seção consolida todo o conteúdo necessário para **usar**, **manter** e **expandir** o GeoBot.
+
+## 1) Início rápido
+
+1. **Instale** executando INSTALAR.bat
+2. **Abra** INICIAR_GEOBOT.bat
+3. **Cole a API Key** da Groq quando solicitado
+4. **Carregue seus dados** na barra lateral
+5. **Converse** com o GeoBot (ex.: “Aplique correção de Bouguer”)
+
+
+## 2) Configuração do ambiente (.env)
+
+Crie o arquivo .env com base em .env.example e preencha:
+
+- GROQ_API_KEY: obrigatório para o chat com IA
+- RAG_BACKEND: chroma (local), supabase (nuvem) ou none (desliga)
+- SUPABASE_URL / SUPABASE_KEY / SUPABASE_SERVICE_KEY: se usar Supabase
+
+### Recomendações
+
+- Para uso local simples: RAG_BACKEND=chroma
+- Para uso compartilhado/escala: RAG_BACKEND=supabase
+- Para desligar o RAG: RAG_BACKEND=none
+
+## 3) Como os dados devem estar organizados
+
+O GeoBot precisa de pelo menos **X**, **Y** e **Valor**.
+
+### Exemplos de colunas aceitas
+
+- X: x, lon, longitude, easting
+- Y: y, lat, latitude, northing
+- Valor (gravidade): gravity, bouguer, free_air
+- Valor (magnetismo): magnetic, tmi, igrf
+
+### Formatos aceitos
+
+- CSV / TXT / Excel
+- Grid regular (quando o arquivo já estiver em formato de grid)
+
+Se o nome das colunas estiver diferente, o GeoBot tenta inferir automaticamente.
+
+## 4) Como conversar com o GeoBot
+
+Usuário pode digitar comandos naturais como:
+
+- “Mostre estatísticas dos dados”
+- “Faça histograma”
+- “Aplique redução ao polo”
+- “Continuação ascendente de 1000 m”
+
+O GeoBot detecta a intenção, executa a função, mostra gráficos e adiciona referências científicas.
+
+## 5) RAG (Base de conhecimento científica)
+
+O RAG é o sistema que permite **citações automáticas**. Ele pode rodar:
+
+### 5.1) Modo local (ChromaDB)
+
+1. Coloque PDFs em rag_database/
+2. Rode o script de atualização (veja seção 6)
+3. Abra o GeoBot normalmente
+
+### 5.2) Modo Supabase (nuvem)
+
+Ideal para equipe ou produção. O GeoBot lê a base que está no Supabase. Quando Usuário roda o script de atualização, a base remota é atualizada e **o GeoBot passa a usar os novos documentos imediatamente nas próximas perguntas**.
+
+## 6) Atualização do RAG (script separado)
+
+O script de atualização é  rag_update.py, exatamente para o usuário rodar quando quiser atualizar a base.
+
+### 6.1) Atualizar Chroma (local)
+
+Exemplo:
+```
+python rag_update.py --backend chroma --force-reindex
+```
+
+### 6.2) Atualizar Supabase (nuvem)
+
+Exemplo:
+```
+python rag_update.py --backend supabase --force-reindex --clear-existing
+```
+
+### 6.3) Parâmetros úteis
+
+- --chunk-size: tamanho dos trechos de texto
+- --overlap: sobreposição de palavras
+
+## 7) Configurando o Supabase para RAG
+
+### 7.1) Crie a extensão pgvector
+
+```sql
+create extension if not exists vector;
+```
+
+### 7.2) Crie a tabela
+
+```sql
+create table if not exists rag_documents (
+    id text primary key,
+    content text not null,
+    metadata jsonb,
+    embedding vector(384)
+);
+```
+
+### 7.3) Crie o índice vetorial
+
+```sql
+create index if not exists rag_documents_embedding_idx
+on rag_documents
+using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+```
+
+### 7.4) Crie a função de busca (RPC)
+
+```sql
+create or replace function match_rag_documents(
+    query_embedding vector(384),
+    match_count int default 5
+)
+returns table (
+    id text,
+    content text,
+    metadata jsonb,
+    distance float
+)
+language plpgsql
+as $$
+begin
+    return query
+    select
+        r.id,
+        r.content,
+        r.metadata,
+        1 - (r.embedding <=> query_embedding) as distance
+    from rag_documents r
+    order by r.embedding <=> query_embedding
+    limit match_count;
+end;
+$$;
+```
+
+> Observação: o modelo all-MiniLM-L6-v2 gera vetores de dimensão 384. Se trocar o modelo, ajuste esse número.
+
+## 8) Criando novas funções de processamento (passo a passo)
+
+### 8.1) Crie a função no arquivo geobot.py
+
+Use o decorador @register_processing e retorne ProcessingResult.
+
+```python
+@register_processing(
+        category="Gravimetria",
+        description="Correção de terreno (exemplo)",
+        input_type="grid",
+        requires_params=["density"]
+)
+def terrain_correction(data: GeophysicalData, density: float = 2.67) -> ProcessingResult:
+        # 1) Valide entrada
+        # 2) Transforme dados
+        # 3) Gere figuras
+        # 4) Retorne ProcessingResult
+        ...
+```
+
+### 8.2) Atualize o mapeamento de comandos
+
+No método detect_processing_command, inclua palavras-chave para a nova função.
+
+### 8.3) Boas práticas obrigatórias
+
+- **Validação:** verifique se as colunas necessárias existem
+- **Units:** use unidades coerentes (mGal, nT, m)
+- **Metadados:** preencha execution_time, parameters e references
+- **Erros claros:** use InvalidDataError ou ProcessingError
+
+### 8.4) Checklist rápido
+
+- [ ] Função registrada
+- [ ] Função aparece no chat via comando
+- [ ] Retorno é ProcessingResult
+- [ ] Inclui referências científicas
+
+## 9) Catálogo de possibilidades (para implementar)
+
+Abaixo está uma lista ampla de possibilidades de funções de processamento e interpretação para dados potenciais para implementar
+### 9.1) Pré-processamento e QC
+- Detecção e remoção de outliers
+- Destrend regional (polinomial, spline)
+- Normalização e equalização
+- Remoção de ruído com wavelets
+- Interpolação adaptativa e kriging
+
+### 9.2) Gravimetria
+- Correção de latitude
+- Correção de deriva instrumental
+- Correção de maré
+- Correção free-air
+- Correção Bouguer simples e completa
+- Correção de terreno (prismas ou DEM)
+- Anomalia isostática
+- Separação regional/residual
+
+### 9.3) Magnetometria
+- Correção diurna
+- Remoção do IGRF
+- Redução ao polo (RTP)
+- Redução ao equador (RTE)
+- Pseudo-gravidade
+- Desmagnetização induzida
+
+### 9.4) Filtros e transformações
+- Passa-baixa, passa-alta, passa-banda
+- Filtros direcionais
+- Continuação ascendente/descendente
+- Derivadas verticais (1ª, 2ª)
+- Derivadas horizontais (THD)
+
+### 9.5) Atributos e realces
+- Sinal analítico
+- Tilt angle
+- Theta map
+- Curvaturas e segunda derivada
+
+### 9.6) Profundidade e fonte
+- Deconvolução de Euler
+- Espectro de potência (depth estimation)
+- Métodos de Peters / Half-slope
+- Local wavenumber
+
+### 9.7) Interpretação geológica
+- Mapeamento automático de lineamentos
+- Estimativa de contatos e falhas
+- Delineamento de bacias sedimentares
+- Identificação de corpos intrusivos
+
+### 9.8) Modelagem e inversão
+- Modelagem 2D/3D de prismas
+- Inversão com regularização (Tikhonov)
+- Inversão conjunta grav+mag
+
+## 10) Boas práticas de interpretação
+
+- **Sempre aplique QC** antes de derivadas
+- **Derivadas amplificam ruído** → use passa-baixa
+- **RTP é instável em baixas latitudes** → prefira ASA/Tilt
+- **Compare mapas antes/depois** para evitar artefatos
+
+## 11) Manutenção e escala
+
+### 11.1) Performance
+- Use GPU quando disponível
+- Prefira grids regulares para FFT
+- Evite reprocessar dados sem necessidade
+
+### 11.2) RAG escalável
+- Supabase com pgvector
+- Use índices ivfflat/hnsw
+- Atualize a base via rag_update.py
+
+### 11.3) Crescimento do projeto
+- Separe módulos conforme funções crescem
+- Crie testes unitários para cada processamento
+- Versione os dados e mantenha changelog
+
+## 12) Solução de problemas
+
+- **RAG não retorna citações:** verifique RAG_BACKEND e PDFs
+- **Supabase não conecta:** confira SUPABASE_URL/KEY
+- **Processamento falha:** verifique se há colunas X/Y e valor
+- **Resultados estranhos:** revise unidades e CRS
 
 ---
 

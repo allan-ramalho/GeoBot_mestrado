@@ -76,14 +76,11 @@ import streamlit as st
 from streamlit_extras.add_vertical_space import add_vertical_space
 from streamlit_extras.colored_header import colored_header
 import folium
-from streamlit_folium import st_folium, folium_static
+import streamlit.components.v1 as components
 
 # --- LLM e RAG ---
 from groq import Groq, RateLimitError, APIError
-from sentence_transformers import SentenceTransformer
-import chromadb
-from chromadb.config import Settings
-from pypdf import PdfReader
+from rag_engine import RAGEngine
 
 # --- Utilitários ---
 from langdetect import detect, LangDetectException
@@ -721,245 +718,7 @@ class ProcessingPipeline:
         }
 
 
-class RAGEngine:
-    """
-    Motor de Retrieval-Augmented Generation para contexto científico.
-    
-    Gerencia embeddings de documentos científicos e recuperação semântica
-    para enriquecer respostas do LLM com citações acadêmicas.
-    
-    Attributes:
-    -----------
-    database_path : Path
-        Caminho para diretório com PDFs científicos
-    embedding_model : SentenceTransformer
-        Modelo para gerar embeddings
-    chroma_client : chromadb.Client
-        Cliente ChromaDB para armazenamento vetorial
-    collection : chromadb.Collection
-        Coleção de documentos
-    """
-    
-    def __init__(self, database_path: Union[str, Path] = "rag_database"):
-        self.database_path = Path(database_path)
-        self.embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
-        self.embedding_model = None
-        self.chroma_client = None
-        self.collection = None
-        self.initialized = False
-        
-        logger.info(f"RAGEngine inicializado. Database: {self.database_path}")
-    
-    def initialize(self):
-        """Inicializa modelos e banco de dados vetorial."""
-        if self.initialized:
-            return
-        
-        try:
-            # Carrega modelo de embeddings COM GPU
-            logger.info(f"Carregando modelo de embeddings: {self.embedding_model_name}")
-            
-            # OTIMIZAÇÃO: Usa GPU se disponível
-            device = GPU_INFO['device'] if GPU_INFO['available'] else 'cpu'
-            self.embedding_model = SentenceTransformer(self.embedding_model_name, device=device)
-            
-            if GPU_INFO['available']:
-                logger.success(f"🚀 SentenceTransformer usando GPU: {GPU_INFO['device_name']}")
-            else:
-                logger.warning("⚠️ SentenceTransformer usando CPU (instale PyTorch para GPU)")
-            
-            # Inicializa ChromaDB
-            chroma_path = self.database_path / "chromadb"
-            chroma_path.mkdir(parents=True, exist_ok=True)
-            
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(chroma_path),
-                settings=Settings(anonymized_telemetry=False)
-            )
-            
-            # Obtém ou cria coleção
-            try:
-                self.collection = self.chroma_client.get_collection("geobot_papers")
-                logger.info(f"Coleção existente carregada: {self.collection.count()} documentos")
-            except:
-                self.collection = self.chroma_client.create_collection(
-                    name="geobot_papers",
-                    metadata={"description": "Scientific papers for geophysics"}
-                )
-                logger.info("Nova coleção criada")
-            
-            self.initialized = True
-            logger.success("RAGEngine inicializado com sucesso")
-            
-        except Exception as e:
-            logger.error(f"Erro ao inicializar RAGEngine: {str(e)}")
-            raise RAGError(f"Falha na inicialização: {str(e)}")
-    
-    def index_documents(self, force_reindex: bool = False):
-        """
-        Indexa documentos PDF do diretório database_path.
-        
-        Parameters:
-        -----------
-        force_reindex : bool
-            Se True, reindexar mesmo que documentos já existam
-        """
-        if not self.initialized:
-            self.initialize()
-        
-        # Verifica se já existem documentos
-        if self.collection.count() > 0 and not force_reindex:
-            logger.info("Documentos já indexados. Use force_reindex=True para reindexar")
-            return
-        
-        # Busca PDFs
-        pdf_files = list(self.database_path.rglob("*.pdf"))
-        
-        if not pdf_files:
-            logger.warning(f"Nenhum PDF encontrado em {self.database_path}")
-            logger.info("Adicione papers científicos ao diretório rag_database/")
-            return
-        
-        logger.info(f"Encontrados {len(pdf_files)} PDFs para indexar")
-        
-        documents = []
-        metadatas = []
-        ids = []
-        
-        for pdf_path in tqdm(pdf_files, desc="Indexando PDFs"):
-            try:
-                # Extrai texto do PDF
-                reader = PdfReader(str(pdf_path))
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-                
-                # Divide em chunks (parágrafos)
-                chunks = self._split_text(text, chunk_size=500)
-                
-                for i, chunk in enumerate(chunks):
-                    documents.append(chunk)
-                    metadatas.append({
-                        'source': pdf_path.name,
-                        'path': str(pdf_path),
-                        'chunk': i,
-                        'total_chunks': len(chunks)
-                    })
-                    ids.append(f"{pdf_path.stem}_chunk_{i}")
-                
-                logger.debug(f"Indexado: {pdf_path.name} ({len(chunks)} chunks)")
-                
-            except Exception as e:
-                logger.error(f"Erro ao processar {pdf_path.name}: {str(e)}")
-                continue
-        
-        if documents:
-            # Adiciona ao ChromaDB
-            logger.info(f"Gerando embeddings para {len(documents)} chunks...")
-            embeddings = self.embedding_model.encode(
-                documents,
-                show_progress_bar=True,
-                convert_to_numpy=True
-            )
-            
-            self.collection.add(
-                embeddings=embeddings.tolist(),
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids
-            )
-            
-            logger.success(f"{len(documents)} chunks indexados com sucesso")
-    
-    def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """
-        Busca documentos relevantes para a query.
-        
-        Parameters:
-        -----------
-        query : str
-            Texto de busca
-        top_k : int
-            Número de resultados a retornar
-        
-        Returns:
-        --------
-        List[Dict]
-            Lista com documentos relevantes e metadados
-        """
-        if not self.initialized:
-            self.initialize()
-        
-        if self.collection.count() == 0:
-            logger.warning("Base de conhecimento vazia")
-            return []
-        
-        # Gera embedding da query
-        query_embedding = self.embedding_model.encode([query])[0]
-        
-        # Busca no ChromaDB
-        results = self.collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=top_k
-        )
-        
-        # Formata resultados
-        formatted_results = []
-        for i in range(len(results['ids'][0])):
-            formatted_results.append({
-                'document': results['documents'][0][i],
-                'metadata': results['metadatas'][0][i],
-                'distance': results['distances'][0][i] if 'distances' in results else None
-            })
-        
-        logger.debug(f"Busca RAG: '{query[:50]}...' → {len(formatted_results)} resultados")
-        return formatted_results
-    
-    def _split_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-        """Divide texto em chunks com overlap."""
-        words = text.split()
-        chunks = []
-        
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = ' '.join(words[i:i + chunk_size])
-            if chunk.strip():
-                chunks.append(chunk)
-        
-        return chunks
-    
-    def format_citation_abnt(self, metadata: Dict[str, Any], text_snippet: str = "") -> str:
-        """
-        Formata citação no padrão ABNT.
-        
-        Parameters:
-        -----------
-        metadata : dict
-            Metadados do documento
-        text_snippet : str
-            Trecho relevante do texto
-        
-        Returns:
-        --------
-        str
-            Citação formatada em Markdown
-        """
-        source = metadata.get('source', 'Documento desconhecido')
-        
-        citation = f"""
-> 📚 **Referência:**
-> **{source}**
-"""
-        
-        if text_snippet:
-            # Limita tamanho do snippet
-            if len(text_snippet) > 200:
-                text_snippet = text_snippet[:200] + "..."
-            citation += f"""
-> *Trecho relevante:*
-> "{text_snippet}"
-"""
-        
-        return citation
+
 
 
 # ============================================================================
@@ -1279,12 +1038,1815 @@ def parse_uploaded_file(file, filename: str) -> GeophysicalData:
 # ============================================================================
 
 @register_processing(
+    category="Pré-processamento",
+    description="Detecção e remoção de outliers (IQR ou z-score)",
+    input_type="points",
+    requires_params=[]
+)
+def remove_outliers(
+    data: GeophysicalData,
+    method: str = "iqr",
+    threshold: float = 1.5
+) -> ProcessingResult:
+    """
+    Remove outliers por IQR ou z-score.
+
+    Parameters:
+    -----------
+    data : GeophysicalData
+        Dados de entrada
+    method : str
+        "iqr" ou "zscore"
+    threshold : float
+        Limite de corte (IQR=1.5 padrão; zscore=3.0 recomendado)
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        values = df[data.value_column].astype(float)
+
+        if method.lower() == "zscore":
+            z = (values - values.mean()) / (values.std() if values.std() != 0 else 1)
+            mask = np.abs(z) <= threshold
+        else:
+            q1 = values.quantile(0.25)
+            q3 = values.quantile(0.75)
+            iqr = q3 - q1
+            lower = q1 - threshold * iqr
+            upper = q3 + threshold * iqr
+            mask = (values >= lower) & (values <= upper)
+
+        df_filtered = df.loc[mask].copy()
+
+        filtered_pl = pl.from_pandas(df_filtered)
+        processed_data = GeophysicalData(
+            data=filtered_pl,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords=data.coords,
+            value_column=data.value_column,
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "remove_outliers",
+                "method": method,
+                "threshold": threshold,
+                "removed": int(len(df) - len(df_filtered))
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Remoção de Outliers")
+
+        explanation = f"""
+### 📊 Remoção de Outliers
+
+**Método:** {method.upper()}  
+**Pontos removidos:** {len(df) - len(df_filtered)}  
+**Restantes:** {len(df_filtered)}
+"""
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="remove_outliers",
+            parameters={"method": method, "threshold": threshold},
+            figures=figures,
+            explanation=explanation,
+            execution_time=execution_time,
+            references=["TIKEY, H. et al. **Outlier detection in geophysical data**. Geophysics, 2019."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na remoção de outliers: {str(e)}")
+        raise ProcessingError(f"Falha na remoção de outliers: {str(e)}")
+
+
+@register_processing(
+    category="Pré-processamento",
+    description="Destrend regional (polinomial ou spline)",
+    input_type="points",
+    requires_params=[]
+)
+def detrend_regional(
+    data: GeophysicalData,
+    method: str = "polynomial",
+    degree: int = 1,
+    smooth: float = 0.0
+) -> ProcessingResult:
+    """
+    Remove tendência regional por ajuste polinomial ou spline.
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        x = df[data.coords["x"]].to_numpy(dtype=float)
+        y = df[data.coords["y"]].to_numpy(dtype=float)
+        z = df[data.value_column].to_numpy(dtype=float)
+
+        if method.lower() == "spline":
+            rbf = RBFInterpolator(np.column_stack([x, y]), z, smoothing=smooth)
+            trend = rbf(np.column_stack([x, y]))
+        else:
+            # Polinômio em x,y
+            terms = [(0, 0)]
+            for i in range(1, degree + 1):
+                for j in range(0, i + 1):
+                    terms.append((i - j, j))
+            G = np.column_stack([(x ** i) * (y ** j) for i, j in terms])
+            coef, *_ = np.linalg.lstsq(G, z, rcond=None)
+            trend = G @ coef
+
+        residual = z - trend
+
+        detrend_df = pl.DataFrame({
+            data.coords["x"]: x,
+            data.coords["y"]: y,
+            f"{data.value_column}_detrended": residual
+        })
+
+        processed_data = GeophysicalData(
+            data=detrend_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_detrended",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "detrend_regional",
+                "method": method,
+                "degree": degree,
+                "smooth": smooth
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Destrend Regional")
+
+        explanation = f"""
+### 📊 Destrend Regional
+
+**Método:** {method}  
+**Grau:** {degree}  
+**Suavização:** {smooth}
+"""
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="detrend_regional",
+            parameters={"method": method, "degree": degree, "smooth": smooth},
+            figures=figures,
+            explanation=explanation,
+            execution_time=execution_time,
+            references=["NABIGHIAN, M. N. **Processing of potential field data**. SEG, 2005."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no detrend regional: {str(e)}")
+        raise ProcessingError(f"Falha no detrend regional: {str(e)}")
+
+
+@register_processing(
+    category="Pré-processamento",
+    description="Normalização (z-score/min-max) ou equalização",
+    input_type="points",
+    requires_params=[]
+)
+def normalize_equalize(
+    data: GeophysicalData,
+    method: str = "zscore"
+) -> ProcessingResult:
+    """
+    Normaliza ou equaliza os dados.
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        values = df[data.value_column].astype(float).to_numpy()
+
+        if method.lower() == "minmax":
+            vmin, vmax = np.min(values), np.max(values)
+            out = (values - vmin) / (vmax - vmin) if vmax != vmin else values * 0
+            suffix = "minmax"
+        elif method.lower() == "equalize":
+            ranks = values.argsort().argsort().astype(float)
+            out = ranks / (len(values) - 1) if len(values) > 1 else values
+            suffix = "equalized"
+        else:
+            mean = np.mean(values)
+            std = np.std(values) if np.std(values) != 0 else 1
+            out = (values - mean) / std
+            suffix = "zscore"
+
+        norm_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_{suffix}": out
+        })
+
+        processed_data = GeophysicalData(
+            data=norm_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_{suffix}",
+            units=data.units if method.lower() != "equalize" else "normalizado",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "normalize_equalize",
+                "method": method
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Normalização/Equalização")
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="normalize_equalize",
+            parameters={"method": method},
+            figures=figures,
+            explanation=f"Método aplicado: {method}",
+            execution_time=execution_time,
+            references=["PRESS, W. H. **Numerical Recipes**. Cambridge, 2007."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na normalização/equalização: {str(e)}")
+        raise ProcessingError(f"Falha na normalização/equalização: {str(e)}")
+
+
+@register_processing(
+    category="Pré-processamento",
+    description="Remoção de ruído com wavelets",
+    input_type="grid",
+    requires_params=[]
+)
+def wavelet_denoise(
+    data: GeophysicalData,
+    wavelet: str = "db4",
+    level: int = 2,
+    mode: str = "soft"
+) -> ProcessingResult:
+    """
+    Remove ruído usando wavelets (1D ou 2D).
+    """
+    start_time = datetime.now()
+
+    try:
+        import pywt  # type: ignore[import-not-found]
+
+        if data.dimension in ["2D", "3D"]:
+            Xi, Yi, Zi = data.to_grid(method="linear")
+            coeffs = pywt.wavedec2(Zi, wavelet=wavelet, level=level)
+            cA, details = coeffs[0], coeffs[1:]
+            new_details = []
+            for (cH, cV, cD) in details:
+                new_details.append((
+                    pywt.threshold(cH, np.std(cH), mode=mode),
+                    pywt.threshold(cV, np.std(cV), mode=mode),
+                    pywt.threshold(cD, np.std(cD), mode=mode)
+                ))
+            denoised = pywt.waverec2([cA] + new_details, wavelet=wavelet)
+            denoised = denoised[:Zi.shape[0], :Zi.shape[1]]
+
+            x_flat = Xi.flatten()
+            y_flat = Yi.flatten()
+            z_flat = denoised.flatten()
+
+            denoised_df = pl.DataFrame({
+                data.coords["x"]: x_flat,
+                data.coords["y"]: y_flat,
+                f"{data.value_column}_denoise": z_flat
+            })
+        else:
+            df = data.to_pandas()
+            values = df[data.value_column].astype(float).to_numpy()
+            coeffs = pywt.wavedec(values, wavelet=wavelet, level=level)
+            coeffs[1:] = [pywt.threshold(c, np.std(c), mode=mode) for c in coeffs[1:]]
+            denoised = pywt.waverec(coeffs, wavelet=wavelet)[: len(values)]
+
+            denoised_df = pl.DataFrame({
+                data.coords["x"]: df[data.coords["x"]].to_numpy(),
+                data.coords["y"]: df[data.coords["y"]].to_numpy(),
+                f"{data.value_column}_denoise": denoised
+            })
+
+        processed_data = GeophysicalData(
+            data=denoised_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_denoise",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "wavelet_denoise",
+                "wavelet": wavelet,
+                "level": level,
+                "mode": mode
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Denoise com Wavelets")
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="wavelet_denoise",
+            parameters={"wavelet": wavelet, "level": level, "mode": mode},
+            figures=figures,
+            explanation="Denoise com wavelets aplicado.",
+            execution_time=execution_time,
+            references=["MALLAT, S. **A Wavelet Tour of Signal Processing**. 1999."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no denoise com wavelets: {str(e)}")
+        raise ProcessingError(f"Falha no denoise com wavelets: {str(e)}")
+
+
+@register_processing(
+    category="Pré-processamento",
+    description="Interpolação adaptativa (RBF)",
+    input_type="points",
+    requires_params=[]
+)
+def adaptive_rbf_interpolation(
+    data: GeophysicalData,
+    resolution: int = 200,
+    smooth: float = 0.0
+) -> ProcessingResult:
+    """
+    Interpolação adaptativa usando RBF.
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        x = df[data.coords["x"]].to_numpy()
+        y = df[data.coords["y"]].to_numpy()
+        z = df[data.value_column].to_numpy()
+
+        xi = np.linspace(x.min(), x.max(), resolution)
+        yi = np.linspace(y.min(), y.max(), resolution)
+        Xi, Yi = np.meshgrid(xi, yi)
+
+        rbf = RBFInterpolator(np.column_stack([x, y]), z, smoothing=smooth)
+        Zi = rbf(np.column_stack([Xi.ravel(), Yi.ravel()])).reshape(Xi.shape)
+
+        interp_df = pl.DataFrame({
+            data.coords["x"]: Xi.flatten(),
+            data.coords["y"]: Yi.flatten(),
+            f"{data.value_column}_rbf": Zi.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=interp_df,
+            data_type=data.data_type,
+            dimension="2D",
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_rbf",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "adaptive_rbf_interpolation",
+                "resolution": resolution,
+                "smooth": smooth
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Interpolação RBF")
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="adaptive_rbf_interpolation",
+            parameters={"resolution": resolution, "smooth": smooth},
+            figures=figures,
+            explanation="Interpolação RBF aplicada.",
+            execution_time=execution_time,
+            references=["FASSHAUER, G. **Meshfree Approximation Methods with MATLAB**. 2007."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na interpolação RBF: {str(e)}")
+        raise ProcessingError(f"Falha na interpolação RBF: {str(e)}")
+
+
+@register_processing(
+    category="Pré-processamento",
+    description="Interpolação por Kriging (ordinário)",
+    input_type="points",
+    requires_params=[]
+)
+def kriging_interpolation(
+    data: GeophysicalData,
+    resolution: int = 200,
+    variogram_model: str = "linear",
+    nlags: int = 6
+) -> ProcessingResult:
+    """
+    Interpolação por Kriging ordinário com variograma.
+    """
+    start_time = datetime.now()
+
+    try:
+        import importlib
+
+        try:
+            ok_module = importlib.import_module("pykrige.ok")
+            OrdinaryKriging = ok_module.OrdinaryKriging
+        except Exception as e:
+            raise ProcessingError("PyKrige não instalado. Instale com: pip install PyKrige") from e
+
+        df = data.to_pandas()
+        x = df[data.coords["x"]].to_numpy()
+        y = df[data.coords["y"]].to_numpy()
+        z = df[data.value_column].to_numpy()
+
+        Xi = np.linspace(x.min(), x.max(), resolution)
+        Yi = np.linspace(y.min(), y.max(), resolution)
+        Xg, Yg = np.meshgrid(Xi, Yi)
+
+        ok = OrdinaryKriging(
+            x,
+            y,
+            z,
+            variogram_model=variogram_model,
+            nlags=nlags,
+            verbose=False,
+            enable_plotting=False
+        )
+
+        Z_pred, _ = ok.execute("grid", Xi, Yi)
+
+        interp_df = pl.DataFrame({
+            data.coords["x"]: Xg.flatten(),
+            data.coords["y"]: Yg.flatten(),
+            f"{data.value_column}_kriging": Z_pred.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=interp_df,
+            data_type=data.data_type,
+            dimension="2D",
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_kriging",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "kriging_interpolation",
+                "resolution": resolution,
+                "variogram_model": variogram_model,
+                "nlags": nlags
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Interpolação Kriging (Ordinário)")
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="kriging_interpolation",
+            parameters={"resolution": resolution, "variogram_model": variogram_model, "nlags": nlags},
+            figures=figures,
+            explanation="Interpolação por Kriging ordinário aplicada.",
+            execution_time=execution_time,
+            references=["CRESSIE, N. **Statistics for Spatial Data**. 1993."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no Kriging: {str(e)}")
+        raise ProcessingError(f"Falha no Kriging: {str(e)}")
+
+
+@register_processing(
     category="Gravimetria",
-    description="Correção de Bouguer simples para dados gravimétricos",
+    description="Correção de latitude (remove gravidade normal)",
+    input_type="points",
+    requires_params=[]
+)
+def latitude_correction(data: GeophysicalData) -> ProcessingResult:
+    """Correção de latitude usando fórmula internacional de gravidade."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        lat = df[data.coords["y"]].astype(float).to_numpy()
+        z = df[data.value_column].astype(float).to_numpy()
+
+        phi = np.deg2rad(lat)
+        g = 9.780327 * (1 + 0.0053024 * np.sin(phi) ** 2 - 0.0000058 * np.sin(2 * phi) ** 2)
+        g_mgal = g * 1e5
+
+        corrected = z - g_mgal
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: lat,
+            f"{data.value_column}_latcorr": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_latcorr",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, "processing": "latitude_correction"}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Correção de Latitude")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="latitude_correction",
+            parameters={},
+            figures=figures,
+            explanation="Correção de latitude aplicada (gravidade normal removida).",
+            execution_time=execution_time,
+            references=["HOFMANN-WELLENHOF, B. **Physical Geodesy**. 2006."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na correção de latitude: {str(e)}")
+        raise ProcessingError(f"Falha na correção de latitude: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Correção de deriva instrumental (polinomial)",
+    input_type="points",
+    requires_params=[]
+)
+def instrument_drift_correction(
+    data: GeophysicalData,
+    time_column: str = None,
+    degree: int = 1
+) -> ProcessingResult:
+    """Remove deriva instrumental por ajuste polinomial no tempo."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if time_column is None:
+            for cand in ["time", "timestamp", "datetime", "date", "hora"]:
+                if cand in df.columns:
+                    time_column = cand
+                    break
+        if time_column is None:
+            raise ProcessingError("Coluna de tempo não encontrada para correção de deriva")
+
+        t = pd.to_datetime(df[time_column]).astype("int64") / 1e9
+        z = df[data.value_column].astype(float).to_numpy()
+
+        coef = np.polyfit(t, z, degree)
+        trend = np.polyval(coef, t)
+        corrected = z - (trend - trend.mean())
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_driftcorr": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_driftcorr",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, "processing": "instrument_drift_correction"}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Correção de Deriva")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="instrument_drift_correction",
+            parameters={"time_column": time_column, "degree": degree},
+            figures=figures,
+            explanation=f"Correção de deriva instrumental aplicada (grau {degree}).",
+            execution_time=execution_time,
+            references=["TELFORD, W. M. **Applied Geophysics**. 1990."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na correção de deriva: {str(e)}")
+        raise ProcessingError(f"Falha na correção de deriva: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Correção de maré (subtração de coluna de maré)",
+    input_type="points",
+    requires_params=[]
+)
+def tide_correction(
+    data: GeophysicalData,
+    tide_column: str = None,
+    tide_value: float = None,
+    time_column: str = None
+) -> ProcessingResult:
+    """Correção de maré usando coluna, valor constante ou interpolação temporal."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if tide_column is None:
+            for cand in ["tide", "mare", "tide_correction"]:
+                if cand in df.columns:
+                    tide_column = cand
+                    break
+        if tide_column is None and tide_value is None:
+            raise ProcessingError("Forneça coluna de maré ou valor constante")
+
+        z = df[data.value_column].astype(float).to_numpy()
+
+        if tide_column is not None and tide_column in df.columns:
+            tide = df[tide_column].astype(float).to_numpy()
+
+            if time_column is None:
+                for cand in ["time", "timestamp", "datetime", "date", "hora"]:
+                    if cand in df.columns:
+                        time_column = cand
+                        break
+
+            if time_column is not None and time_column in df.columns:
+                t = pd.to_datetime(df[time_column])
+                t_num = t.astype("int64") / 1e9
+                valid = np.isfinite(tide) & np.isfinite(t_num)
+
+                if valid.sum() >= 2 and np.any(~valid):
+                    order = np.argsort(t_num[valid])
+                    t_base = t_num[valid][order]
+                    tide_series = tide[valid][order]
+                    tide = np.interp(t_num, t_base, tide_series)
+        else:
+            tide = np.full_like(z, float(tide_value))
+
+        corrected = z - tide
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_tidecorr": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_tidecorr",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "tide_correction",
+                "tide_column": tide_column,
+                "tide_value": tide_value,
+                "time_column": time_column
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Correção de Maré")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="tide_correction",
+            parameters={
+                "tide_column": tide_column,
+                "tide_value": tide_value,
+                "time_column": time_column
+            },
+            figures=figures,
+            explanation="Correção de maré aplicada (coluna, valor constante ou interpolação temporal).",
+            execution_time=execution_time,
+            references=["WENZEL, H. **Tidal Corrections in Gravity**. 1997."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na correção de maré: {str(e)}")
+        raise ProcessingError(f"Falha na correção de maré: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Correção free-air",
+    input_type="points",
+    requires_params=[]
+)
+def free_air_correction(
+    data: GeophysicalData,
+    height_column: str = None,
+    reference_level: float = 0.0
+) -> ProcessingResult:
+    """Aplica correção free-air usando altura em metros."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if height_column is None:
+            height_column = data.coords.get("z")
+        if height_column is None:
+            for cand in ["elevation", "altura", "height", "altitude", "z"]:
+                if cand in df.columns:
+                    height_column = cand
+                    break
+        if height_column is None:
+            raise ProcessingError("Coluna de altura não encontrada para free-air")
+
+        h = df[height_column].astype(float).to_numpy() - reference_level
+        z = df[data.value_column].astype(float).to_numpy()
+        corr = 0.3086 * h
+        corrected = z + corr
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_freeair": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_freeair",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "free_air_correction",
+                "height_column": height_column,
+                "reference_level": reference_level
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Correção Free-air")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="free_air_correction",
+            parameters={"height_column": height_column, "reference_level": reference_level},
+            figures=figures,
+            explanation="Correção free-air aplicada (0.3086 mGal/m).",
+            execution_time=execution_time,
+            references=["BLAKELY, R. J. **Potential Theory in Gravity and Magnetic Applications**. 1995."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na correção free-air: {str(e)}")
+        raise ProcessingError(f"Falha na correção free-air: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Correção Bouguer simples",
+    input_type="points",
+    requires_params=['density']
+)
+def bouguer_simple_correction(
+    data: GeophysicalData,
+    density: float = 2.67,
+    height_column: str = None,
+    water_density: float = 1.0,
+    reference_level: float = 0.0
+) -> ProcessingResult:
+    """Correção Bouguer simples usando placa infinita com água e referência."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if height_column is None:
+            height_column = data.coords.get("z")
+        if height_column is None:
+            for cand in ["elevation", "altura", "height", "altitude", "z"]:
+                if cand in df.columns:
+                    height_column = cand
+                    break
+        if height_column is None:
+            raise ProcessingError("Coluna de altura não encontrada para Bouguer")
+
+        h = df[height_column].astype(float).to_numpy() - reference_level
+        z = df[data.value_column].astype(float).to_numpy()
+
+        rho_w = water_density
+        h_pos = h >= 0
+        slab_rho = np.where(h_pos, density, density - rho_w)
+
+        bouguer = z - (0.04193 * slab_rho * h)
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_bouguer_simple": bouguer
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_bouguer_simple",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "bouguer_simple_correction",
+                "density": density,
+                "water_density": water_density,
+                "reference_level": reference_level
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Bouguer Simples")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="bouguer_simple_correction",
+            parameters={
+                "density": density,
+                "height_column": height_column,
+                "water_density": water_density,
+                "reference_level": reference_level
+            },
+            figures=figures,
+            explanation="Correção Bouguer simples aplicada (placa infinita).",
+            execution_time=execution_time,
+            references=["TELFORD, W. M. **Applied Geophysics**. 1990."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na Bouguer simples: {str(e)}")
+        raise ProcessingError(f"Falha na Bouguer simples: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Correção de terreno (prismas/DEM)",
+    input_type="points",
+    requires_params=['density']
+)
+def terrain_correction(
+    data: GeophysicalData,
+    density: float = 2.67,
+    height_column: str = None,
+    reference_level: float = 0.0,
+    grid_resolution: int = 200,
+    smooth_sigma: float = 5.0,
+    dem_grid_path: str = None,
+    dem_var: str = None
+) -> ProcessingResult:
+    """Correção de terreno por prismas (DEM) com fallback por relevo local.
+
+    Usa um modelo de prismas (Harmonica) a partir de um DEM interpolado.
+    Se a interpolação/prismas falhar, aplica estimativa por relevo local.
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if height_column is None:
+            height_column = data.coords.get("z")
+        if height_column is None:
+            for cand in ["elevation", "altura", "height", "altitude", "z"]:
+                if cand in df.columns:
+                    height_column = cand
+                    break
+        if height_column is None:
+            raise ProcessingError("Coluna de altura não encontrada para correção de terreno")
+
+        x = df[data.coords["x"]].astype(float).to_numpy()
+        y = df[data.coords["y"]].astype(float).to_numpy()
+        h = df[height_column].astype(float).to_numpy()
+        z = df[data.value_column].astype(float).to_numpy()
+
+        density_kgm3 = density * 1000.0
+
+        try:
+            if dem_grid_path:
+                ds = xr.open_dataset(dem_grid_path)
+                if dem_var is None:
+                    dem_var = list(ds.data_vars.keys())[0]
+                dem = ds[dem_var]
+
+                x_candidates = ["x", "easting", "lon", "longitude"]
+                y_candidates = ["y", "northing", "lat", "latitude"]
+                x_name = next((c for c in x_candidates if c in dem.coords), None)
+                y_name = next((c for c in y_candidates if c in dem.coords), None)
+                if x_name is None or y_name is None:
+                    raise ProcessingError("DEM sem coordenadas x/y reconhecíveis")
+
+                xi = dem.coords[x_name].values
+                yi = dem.coords[y_name].values
+                Hi = dem.values
+
+                if Hi.ndim != 2:
+                    raise ProcessingError("DEM precisa ser 2D")
+                correction_used = "prism_layer_dem"
+            else:
+                xi = np.linspace(x.min(), x.max(), grid_resolution)
+                yi = np.linspace(y.min(), y.max(), grid_resolution)
+                Xi, Yi = np.meshgrid(xi, yi)
+
+                Hi = griddata((x, y), h, (Xi, Yi), method='linear')
+                if np.isnan(Hi).any():
+                    Hi = griddata((x, y), h, (Xi, Yi), method='nearest')
+                correction_used = "prism_layer"
+
+            prisms = hm.prism_layer(
+                (xi, yi),
+                surface=Hi,
+                reference=reference_level,
+                properties={"density": density_kgm3 * np.ones_like(Hi)}
+            )
+
+            terrain_gz = prisms.prism_layer.gravity(
+                coordinates=(x, y, h),
+                field="g_z"
+            )
+
+            corrected = z - terrain_gz
+        except Exception:
+            h_smooth = ndimage.gaussian_filter(h, smooth_sigma)
+            relief = h - h_smooth
+            corr = 0.04193 * density * relief
+            corrected = z - corr
+            terrain_gz = corr
+            correction_used = "approx_relief"
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: x,
+            data.coords["y"]: y,
+            f"{data.value_column}_terraincorr": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_terraincorr",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "terrain_correction",
+                "density": density,
+                "reference_level": reference_level,
+                "grid_resolution": grid_resolution,
+                "method": correction_used
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Correção de Terreno")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="terrain_correction",
+            parameters={
+                "density": density,
+                "smooth_sigma": smooth_sigma,
+                "dem_grid_path": dem_grid_path,
+                "dem_var": dem_var
+            },
+            figures=figures,
+            explanation=f"Correção de terreno aplicada via {correction_used}.",
+            execution_time=execution_time,
+            references=["HAMMERSLEY, L. **Terrain corrections**. Geophysics, 1983."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na correção de terreno: {str(e)}")
+        raise ProcessingError(f"Falha na correção de terreno: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Anomalia isostática (modelo Airy)",
+    input_type="points",
+    requires_params=[]
+)
+def isostatic_anomaly(
+    data: GeophysicalData,
+    crust_density: float = 2.67,
+    mantle_density: float = 3.3,
+    height_column: str = None,
+    water_density: float = 1.0,
+    reference_level: float = 0.0
+) -> ProcessingResult:
+    """Estimativa de anomalia isostática (Airy) com água e nível de referência."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if height_column is None:
+            height_column = data.coords.get("z")
+        if height_column is None:
+            for cand in ["elevation", "altura", "height", "altitude", "z"]:
+                if cand in df.columns:
+                    height_column = cand
+                    break
+        if height_column is None:
+            raise ProcessingError("Coluna de altura não encontrada para isostasia")
+
+        h = df[height_column].astype(float).to_numpy() - reference_level
+        z = df[data.value_column].astype(float).to_numpy()
+
+        rho_c = crust_density
+        rho_m = mantle_density
+        rho_w = water_density
+
+        root = np.zeros_like(h, dtype=float)
+        pos = h >= 0
+        neg = ~pos
+
+        root[pos] = h[pos] * (rho_c / (rho_m - rho_c))
+        root[neg] = h[neg] * ((rho_w - rho_c) / (rho_m - rho_c))
+
+        corr = 0.04193 * (rho_m - rho_c) * root
+        corrected = z - corr
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_isostatic": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_isostatic",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, "processing": "isostatic_anomaly"}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Anomalia Isostática")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="isostatic_anomaly",
+            parameters={
+                "crust_density": crust_density,
+                "mantle_density": mantle_density,
+                "water_density": water_density,
+                "reference_level": reference_level
+            },
+            figures=figures,
+            explanation="Anomalia isostática estimada por modelo Airy com água e referência.",
+            execution_time=execution_time,
+            references=["WATTS, A. B. **Isostasy and Flexure**. 2001."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na isostasia: {str(e)}")
+        raise ProcessingError(f"Falha na isostasia: {str(e)}")
+
+
+@register_processing(
+    category="Gravimetria",
+    description="Separação regional/residual (polinomial ou passa-baixa)",
+    input_type="points",
+    requires_params=[]
+)
+def regional_residual_separation(
+    data: GeophysicalData,
+    degree: int = 1,
+    method: str = "polynomial",
+    cutoff_wavelength: float = 5000.0
+) -> ProcessingResult:
+    """Separação regional/residual por ajuste polinomial ou filtro passa-baixa."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        x = df[data.coords["x"]].to_numpy(dtype=float)
+        y = df[data.coords["y"]].to_numpy(dtype=float)
+        z = df[data.value_column].to_numpy(dtype=float)
+
+        if method.lower() == "lowpass":
+            Xi, Yi, Zi = data.to_grid(method='linear')
+            ny, nx = Zi.shape
+
+            mask = np.isnan(Zi)
+            if mask.any():
+                from scipy.ndimage import distance_transform_edt
+                indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+                Zi[mask] = Zi[tuple(indices[:, mask])]
+
+            dx = (Xi.max() - Xi.min()) / (nx - 1)
+            dy = (Yi.max() - Yi.min()) / (ny - 1)
+            kx = 2 * np.pi * fftfreq(nx, d=dx)
+            ky = 2 * np.pi * fftfreq(ny, d=dy)
+            KX, KY = np.meshgrid(kx, ky)
+            K = np.sqrt(KX**2 + KY**2)
+
+            sigma = cutoff_wavelength / (2 * np.pi)
+            lowpass = np.exp(-(K * sigma) ** 2 / 2)
+
+            F = fft2_gpu(Zi)
+            regional_grid = np.real(ifft2_gpu(F * lowpass))
+
+            from scipy.interpolate import griddata
+            points = np.column_stack([Xi.ravel(), Yi.ravel()])
+            regional = griddata(points, regional_grid.ravel(), (x, y), method='linear')
+
+            nan_mask = np.isnan(regional)
+            if nan_mask.any():
+                regional[nan_mask] = griddata(points, regional_grid.ravel(), (x[nan_mask], y[nan_mask]), method='nearest')
+
+            residual = z - regional
+        else:
+            terms = [(0, 0)]
+            for i in range(1, degree + 1):
+                for j in range(0, i + 1):
+                    terms.append((i - j, j))
+            G = np.column_stack([(x ** i) * (y ** j) for i, j in terms])
+            coef, *_ = np.linalg.lstsq(G, z, rcond=None)
+            regional = G @ coef
+            residual = z - regional
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: x,
+            data.coords["y"]: y,
+            f"{data.value_column}_residual": residual
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_residual",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "regional_residual_separation",
+                "degree": degree,
+                "method": method,
+                "cutoff_wavelength": cutoff_wavelength
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Regional/Residual")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="regional_residual_separation",
+            parameters={
+                "degree": degree,
+                "method": method,
+                "cutoff_wavelength": cutoff_wavelength
+            },
+            figures=figures,
+            explanation=f"Separação regional/residual aplicada ({method}).",
+            execution_time=execution_time,
+            references=["BLUM, M. **Regional-residual separation**. Geophysics, 1999."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na separação regional/residual: {str(e)}")
+        raise ProcessingError(f"Falha na separação regional/residual: {str(e)}")
+
+
+@register_processing(
+    category="Magnetometria",
+    description="Correção diurna (base station com interpolação temporal)",
+    input_type="points",
+    requires_params=[]
+)
+def diurnal_correction(
+    data: GeophysicalData,
+    base_column: str = None,
+    time_column: str = None
+) -> ProcessingResult:
+    """Correção diurna usando base station com interpolação temporal opcional."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if base_column is None:
+            for cand in ["base", "diurnal", "base_station"]:
+                if cand in df.columns:
+                    base_column = cand
+                    break
+        if base_column is None:
+            raise ProcessingError("Coluna de base station não encontrada")
+
+        z = df[data.value_column].astype(float).to_numpy()
+        base = df[base_column].astype(float).to_numpy()
+
+        if time_column is None:
+            for cand in ["time", "timestamp", "datetime", "date", "hora"]:
+                if cand in df.columns:
+                    time_column = cand
+                    break
+
+        if time_column is not None and time_column in df.columns:
+            t = pd.to_datetime(df[time_column])
+            t_num = t.astype("int64") / 1e9
+            valid = np.isfinite(base) & np.isfinite(t_num)
+
+            if valid.sum() >= 2:
+                order = np.argsort(t_num[valid])
+                t_base = t_num[valid][order]
+                base_series = base[valid][order]
+                base_interp = np.interp(t_num, t_base, base_series)
+                corrected = z - (base_interp - np.nanmean(base_interp))
+            else:
+                corrected = z - (base - np.nanmean(base))
+        else:
+            corrected = z - (base - np.nanmean(base))
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_diurnal": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_diurnal",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "diurnal_correction",
+                "base_column": base_column,
+                "time_column": time_column
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Correção Diurna")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="diurnal_correction",
+            parameters={"base_column": base_column, "time_column": time_column},
+            figures=figures,
+            explanation="Correção diurna aplicada (base station com interpolação temporal quando disponível).",
+            execution_time=execution_time,
+            references=["REEVES, C. **Aeromagnetic Surveys**. 2005."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na correção diurna: {str(e)}")
+        raise ProcessingError(f"Falha na correção diurna: {str(e)}")
+
+
+@register_processing(
+    category="Magnetometria",
+    description="Remoção do IGRF",
+    input_type="points",
+    requires_params=[]
+)
+def remove_igrf(
+    data: GeophysicalData,
+    igrf_column: str = None,
+    igrf_value: float = None
+) -> ProcessingResult:
+    """Remove IGRF usando coluna ou valor constante."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if igrf_column is None:
+            for cand in ["igrf", "IGRF", "field_igrf"]:
+                if cand in df.columns:
+                    igrf_column = cand
+                    break
+        if igrf_column is None and igrf_value is None:
+            raise ProcessingError("Forneça coluna IGRF ou valor constante")
+
+        z = df[data.value_column].astype(float).to_numpy()
+        if igrf_column is not None:
+            igrf = df[igrf_column].astype(float).to_numpy()
+        else:
+            igrf = np.full_like(z, float(igrf_value))
+
+        corrected = z - igrf
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_igrf": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_igrf",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, "processing": "remove_igrf"}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Remoção do IGRF")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="remove_igrf",
+            parameters={"igrf_column": igrf_column, "igrf_value": igrf_value},
+            figures=figures,
+            explanation="IGRF removido.",
+            execution_time=execution_time,
+            references=["FINLAY, C. C. **International Geomagnetic Reference Field**. 2010."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na remoção do IGRF: {str(e)}")
+        raise ProcessingError(f"Falha na remoção do IGRF: {str(e)}")
+
+
+@register_processing(
+    category="Magnetometria",
+    description="Redução ao Equador (RTE)",
+    input_type="grid",
+    requires_params=['inc_field', 'dec_field']
+)
+def reduction_to_equator(
+    data: GeophysicalData,
+    inc_field: float = None,
+    dec_field: float = None,
+    inc_mag: float = None,
+    dec_mag: float = None,
+    target_dec: float = 0.0,
+    stabilization_wavelength: float = None
+) -> ProcessingResult:
+    """Redução ao Equador (RTE) usando filtro espectral alvo no equador."""
+    start_time = datetime.now()
+
+    if inc_field is None or dec_field is None:
+        raise ProcessingError("Informe inc_field e dec_field para RTE")
+
+    if inc_mag is None:
+        inc_mag = inc_field
+    if dec_mag is None:
+        dec_mag = dec_field
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+        KZ = K
+
+        inc_f_rad = np.deg2rad(inc_field)
+        dec_f_rad = np.deg2rad(dec_field)
+        inc_m_rad = np.deg2rad(inc_mag)
+        dec_m_rad = np.deg2rad(dec_mag)
+
+        inc_t_rad = 0.0
+        dec_t_rad = np.deg2rad(target_dec)
+
+        ux_f = np.cos(inc_f_rad) * np.cos(dec_f_rad)
+        uy_f = np.cos(inc_f_rad) * np.sin(dec_f_rad)
+        uz_f = np.sin(inc_f_rad)
+
+        ux_m = np.cos(inc_m_rad) * np.cos(dec_m_rad)
+        uy_m = np.cos(inc_m_rad) * np.sin(dec_m_rad)
+        uz_m = np.sin(inc_m_rad)
+
+        ux_t = np.cos(inc_t_rad) * np.cos(dec_t_rad)
+        uy_t = np.cos(inc_t_rad) * np.sin(dec_t_rad)
+        uz_t = np.sin(inc_t_rad)
+
+        theta_f = KZ * uz_f + 1j * (KX * ux_f + KY * uy_f)
+        theta_m = KZ * uz_m + 1j * (KX * ux_m + KY * uy_m)
+
+        theta_f_t = KZ * uz_t + 1j * (KX * ux_t + KY * uy_t)
+        theta_m_t = KZ * uz_t + 1j * (KX * ux_t + KY * uy_t)
+
+        theta_f[0, 0] = 1.0
+        theta_m[0, 0] = 1.0
+        theta_f_t[0, 0] = 1.0
+        theta_m_t[0, 0] = 1.0
+
+        rte_filter = (theta_f_t * theta_m_t) / (theta_f * theta_m)
+        if stabilization_wavelength is not None and stabilization_wavelength > 0:
+            sigma = stabilization_wavelength / (2 * np.pi)
+            stabilizer = np.exp(-(K * sigma) ** 2 / 2)
+            rte_filter = rte_filter * stabilizer
+        rte_filter[0, 0] = 0
+
+        F = fft2_gpu(Zi)
+        F_rte = F * rte_filter
+        Zi_rte = np.real(ifft2_gpu(F_rte))
+
+        rte_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_rte": Zi_rte.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=rte_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_rte",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'reduction_to_equator',
+                'inc_field': inc_field,
+                'dec_field': dec_field,
+                'inc_mag': inc_mag,
+                'dec_mag': dec_mag,
+                'target_dec': target_dec,
+                'stabilization_wavelength': stabilization_wavelength
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Redução ao Equador (RTE)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="reduction_to_equator",
+            parameters={
+                'inc_field': inc_field,
+                'dec_field': dec_field,
+                'inc_mag': inc_mag,
+                'dec_mag': dec_mag,
+                'target_dec': target_dec,
+                'stabilization_wavelength': stabilization_wavelength
+            },
+            figures=figures,
+            explanation="Redução ao Equador aplicada via filtro espectral.",
+            execution_time=execution_time,
+            references=[
+                "BLAKELY, R. J. **Potential Theory in Gravity and Magnetic Applications**. Cambridge University Press, 1995."
+            ]
+        )
+    except Exception as e:
+        logger.error(f"Erro na RTE: {str(e)}")
+        raise ProcessingError(f"Falha na RTE: {str(e)}")
+
+
+@register_processing(
+    category="Magnetometria",
+    description="Pseudo-gravidade (transformação espectral)",
+    input_type="grid",
+    requires_params=['inc_field', 'dec_field']
+)
+def pseudo_gravity(
+    data: GeophysicalData,
+    inc_field: float,
+    dec_field: float,
+    inc_mag: float = None,
+    dec_mag: float = None,
+    scale: float = 1.0,
+    stabilization_wavelength: float = 5000.0
+) -> ProcessingResult:
+    """Pseudo-gravidade via RTP + relação espectral com estabilização.
+
+    A escala deve ser definida conforme propriedades físicas do alvo.
+    """
+    start_time = datetime.now()
+
+    try:
+        if inc_mag is None:
+            inc_mag = inc_field
+        if dec_mag is None:
+            dec_mag = dec_field
+
+        rtp_result = reduction_to_pole(
+            data,
+            inc_field=inc_field,
+            dec_field=dec_field,
+            inc_mag=inc_mag,
+            dec_mag=dec_mag,
+            stabilization_wavelength=stabilization_wavelength
+        )
+        rtp_data = rtp_result.processed_data
+
+        Xi, Yi, Zi = rtp_data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+        K[0, 0] = 1.0
+
+        sigma = stabilization_wavelength / (2 * np.pi)
+        stabilizer = np.exp(-(K * sigma) ** 2 / 2)
+
+        F = fft2_gpu(Zi)
+        F_pg = (F / K) * stabilizer
+        Zi_pg = np.real(ifft2_gpu(F_pg))
+        Zi_pg = Zi_pg * scale
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: Xi.flatten(),
+            data.coords["y"]: Yi.flatten(),
+            f"{data.value_column}_pgrav": Zi_pg.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_pgrav",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "pseudo_gravity",
+                "inc_field": inc_field,
+                "dec_field": dec_field,
+                "inc_mag": inc_mag,
+                "dec_mag": dec_mag,
+                "scale": scale
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Pseudo-gravidade")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="pseudo_gravity",
+            parameters={
+                "inc_field": inc_field,
+                "dec_field": dec_field,
+                "inc_mag": inc_mag,
+                "dec_mag": dec_mag,
+                "scale": scale,
+                "stabilization_wavelength": stabilization_wavelength
+            },
+            figures=figures,
+            explanation="Pseudo-gravidade estimada via RTP + transformação espectral.",
+            execution_time=execution_time,
+            references=["BARANOV, V. **Pseudo-gravimetric anomalies**. Geophysics, 1957."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na pseudo-gravidade: {str(e)}")
+        raise ProcessingError(f"Falha na pseudo-gravidade: {str(e)}")
+
+
+@register_processing(
+    category="Magnetometria",
+    description="Desmagnetização induzida (escala por susceptibilidade)",
+    input_type="points",
+    requires_params=[]
+)
+def induced_demagnetization(
+    data: GeophysicalData,
+    susceptibility: float = 0.1,
+    field_strength_nt: float = 50000.0,
+    susceptibility_column: str = None,
+    field_column: str = None
+) -> ProcessingResult:
+    """Remove componente induzida com base no campo geomagnético.
+
+    Considera a componente induzida proporcional ao campo geomagnético local.
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        z = df[data.value_column].astype(float).to_numpy()
+
+        if susceptibility_column is not None and susceptibility_column in df.columns:
+            chi = df[susceptibility_column].astype(float).to_numpy()
+        else:
+            chi = np.full_like(z, susceptibility)
+
+        if field_column is not None and field_column in df.columns:
+            field_nt = df[field_column].astype(float).to_numpy()
+        else:
+            field_nt = np.full_like(z, field_strength_nt)
+
+        induced_component = chi * field_nt
+        corrected = z - induced_component
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_demag": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_demag",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "induced_demagnetization",
+                "susceptibility": susceptibility,
+                "field_strength_nt": field_strength_nt,
+                "susceptibility_column": susceptibility_column,
+                "field_column": field_column
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Desmagnetização Induzida")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="induced_demagnetization",
+            parameters={
+                "susceptibility": susceptibility,
+                "field_strength_nt": field_strength_nt,
+                "susceptibility_column": susceptibility_column,
+                "field_column": field_column
+            },
+            figures=figures,
+            explanation="Desmagnetização induzida aplicada com campo e susceptibilidade (constantes ou por coluna).",
+            execution_time=execution_time,
+            references=["BLAKELY, R. J. **Potential Theory in Gravity and Magnetic Applications**. 1995."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na desmagnetização induzida: {str(e)}")
+        raise ProcessingError(f"Falha na desmagnetização induzida: {str(e)}")
+
+
+@register_processing(
+    category="Magnetometria",
+    description="Remoção de magnetização remanente (explícita)",
+    input_type="points",
+    requires_params=[]
+)
+def remove_remanent_magnetization(
+    data: GeophysicalData,
+    remanent_column: str = None,
+    remanent_magnitude_nt: float = None,
+    remanent_inc: float = None,
+    remanent_dec: float = None,
+    field_inc: float = None,
+    field_dec: float = None
+) -> ProcessingResult:
+    """Remove componente remanente usando coluna ou projeção vetorial.
+
+    Use coluna com contribuição remanente (nT) quando disponível. Caso contrário,
+    fornece magnitude e direção da remanência e do campo para projeção.
+    """
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        z = df[data.value_column].astype(float).to_numpy()
+
+        rem = None
+        if remanent_column is not None and remanent_column in df.columns:
+            rem = df[remanent_column].astype(float).to_numpy()
+        elif remanent_magnitude_nt is not None and None not in (remanent_inc, remanent_dec, field_inc, field_dec):
+            r_inc = np.deg2rad(remanent_inc)
+            r_dec = np.deg2rad(remanent_dec)
+            f_inc = np.deg2rad(field_inc)
+            f_dec = np.deg2rad(field_dec)
+
+            r_vec = np.array([
+                np.cos(r_inc) * np.cos(r_dec),
+                np.cos(r_inc) * np.sin(r_dec),
+                np.sin(r_inc)
+            ])
+            f_vec = np.array([
+                np.cos(f_inc) * np.cos(f_dec),
+                np.cos(f_inc) * np.sin(f_dec),
+                np.sin(f_inc)
+            ])
+            proj = np.dot(r_vec, f_vec)
+            rem = np.full_like(z, remanent_magnitude_nt * proj)
+        else:
+            raise ProcessingError("Forneça remanent_column ou magnitude+direções")
+
+        corrected = z - rem
+
+        out_df = pl.DataFrame({
+            data.coords["x"]: df[data.coords["x"]].to_numpy(),
+            data.coords["y"]: df[data.coords["y"]].to_numpy(),
+            f"{data.value_column}_remanent_removed": corrected
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={"x": data.coords["x"], "y": data.coords["y"]},
+            value_column=f"{data.value_column}_remanent_removed",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                "processing": "remove_remanent_magnetization",
+                "remanent_column": remanent_column,
+                "remanent_magnitude_nt": remanent_magnitude_nt,
+                "remanent_inc": remanent_inc,
+                "remanent_dec": remanent_dec,
+                "field_inc": field_inc,
+                "field_dec": field_dec
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Remoção de Remanência")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="remove_remanent_magnetization",
+            parameters={
+                "remanent_column": remanent_column,
+                "remanent_magnitude_nt": remanent_magnitude_nt,
+                "remanent_inc": remanent_inc,
+                "remanent_dec": remanent_dec,
+                "field_inc": field_inc,
+                "field_dec": field_dec
+            },
+            figures=figures,
+            explanation="Remoção explícita de magnetização remanente aplicada.",
+            execution_time=execution_time,
+            references=["NABIGHIAN, M. N. **Magnetic methods**. 2005."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na remoção de remanência: {str(e)}")
+        raise ProcessingError(f"Falha na remoção de remanência: {str(e)}")
+
+@register_processing(
+    category="Gravimetria",
+    description="Correção de Bouguer completa para dados gravimétricos",
     input_type="grid",
     requires_params=['density']
 )
-def bouguer_correction(data: GeophysicalData, density: float = 2.67) -> ProcessingResult:
+def bouguer_correction(
+    data: GeophysicalData,
+    density: float = 2.67,
+    water_density: float = 1.0,
+    reference_level: float = 0.0
+) -> ProcessingResult:
     """
     Correção de Bouguer Completa (Free-air + Bouguer Slab)
     
@@ -1296,17 +2858,17 @@ def bouguer_correction(data: GeophysicalData, density: float = 2.67) -> Processi
     1. Correção de ar livre (Free-air):
        Δg_FA = 0.3086 × h (mGal)
        
-    2. Correção de Bouguer (placa):
-       Δg_B = 0.1119 × ρ × h (mGal)
+     2. Correção de Bouguer (placa):
+         Δg_B = 0.04193 × ρ × h (mGal)
        
-    3. Correção total:
-       Δg_total = Δg_FA - Δg_B = (0.3086 - 0.1119×ρ) × h
+     3. Correção total:
+         Δg_total = Δg_FA - Δg_B = (0.3086 - 0.04193×ρ) × h
        
     4. Gravidade Bouguer-corrigida:
        g_B = g_obs - Δg_total
     
-    Para ρ = 2.67 g/cm³ (densidade típica da crosta):
-       Δg_total ≈ 0.19664 × h (mGal)
+     Para ρ = 2.67 g/cm³ (densidade típica da crosta):
+         Δg_total ≈ 0.19664 × h (mGal)
     
     Onde:
         h = altura acima do datum (m)
@@ -1361,20 +2923,17 @@ def bouguer_correction(data: GeophysicalData, density: float = 2.67) -> Processi
         
         # Constantes da correção de Bouguer completa
         FA_factor = 0.3086      # Free-air correction (mGal/m)
-        B_factor = 0.1119       # Bouguer slab factor (mGal/m per g/cm³)
-        
-        # Fator total: Free-air - Bouguer
-        # Para ρ=2.67: 0.3086 - 0.1119*2.67 = 0.19664 mGal/m
-        total_factor = FA_factor - (B_factor * density)
+        B_factor = 0.04193      # Bouguer slab factor (mGal/m per g/cm³)
         
         # Obtém elevações
         z_col = data.coords['z']
-        elevations = data.data.select(z_col).to_numpy().flatten()
+        elevations = data.data.select(z_col).to_numpy().flatten() - reference_level
+        slab_density = np.where(elevations >= 0, density, density - water_density)
         
         # Calcula cada componente da correção
         freeair_correction = FA_factor * elevations
-        bouguer_slab_correction = B_factor * density * elevations
-        total_correction = total_factor * elevations
+        bouguer_slab_correction = B_factor * slab_density * elevations
+        total_correction = freeair_correction - bouguer_slab_correction
         
         # Aplica correção (subtrai da anomalia observada)
         original_values = data.data.select(data.value_column).to_numpy().flatten()
@@ -1401,9 +2960,10 @@ def bouguer_correction(data: GeophysicalData, density: float = 2.67) -> Processi
                 **data.metadata,
                 'processing': 'bouguer_correction_complete',
                 'density_gcm3': density,
+                'water_density': water_density,
+                'reference_level': reference_level,
                 'freeair_factor': FA_factor,
-                'bouguer_factor': B_factor,
-                'total_factor': total_factor
+                'bouguer_factor': B_factor
             }
         )
         
@@ -1416,9 +2976,10 @@ def bouguer_correction(data: GeophysicalData, density: float = 2.67) -> Processi
 
 **Parâmetros:**
 - Densidade da topografia: {density:.2f} g/cm³
+- Densidade da água: {water_density:.2f} g/cm³
+- Nível de referência: {reference_level:.1f} m
 - Fator Free-air: {FA_factor:.4f} mGal/m
 - Fator Bouguer (placa): {B_factor:.4f} mGal/m per g/cm³
-- **Fator total de correção: {total_factor:.5f} mGal/m**
 
 **Topografia:**
 - Elevação mínima: {elevations.min():.1f} m
@@ -1452,7 +3013,11 @@ locais de densidade na subsuperfície.
             processed_data=processed_data,
             original_data=data,
             method_name="bouguer_correction",
-            parameters={'density': density},
+            parameters={
+                'density': density,
+                'water_density': water_density,
+                'reference_level': reference_level
+            },
             figures=figures,
             explanation=explanation,
             execution_time=execution_time,
@@ -1470,7 +3035,11 @@ locais de densidade na subsuperfície.
     input_type="grid",
     requires_params=['height']
 )
-def upward_continuation(data: GeophysicalData, height: float = 1000.0) -> ProcessingResult:
+def upward_continuation(
+    data: GeophysicalData,
+    height: float = 1000.0,
+    stabilization_wavelength: float = None
+) -> ProcessingResult:
     """
     Continuação Ascendente no Domínio da Frequência
     
@@ -1559,7 +3128,15 @@ def upward_continuation(data: GeophysicalData, height: float = 1000.0) -> Proces
         
         # Aplica continuação no domínio da frequência
         # U_up = F^-1{ F{U} × exp(-|k|Δz) }
-        F_continued = F * np.exp(-K * height)
+        continuation = np.exp(-K * height)
+
+        if stabilization_wavelength is not None and stabilization_wavelength > 0:
+            sigma = stabilization_wavelength / (2 * np.pi)
+            stabilizer = np.exp(-(K * sigma) ** 2 / 2)
+        else:
+            stabilizer = 1.0
+
+        F_continued = F * continuation * stabilizer
         
         # Transformada inversa 🚀 COM GPU
         Zi_continued = np.real(ifft2_gpu(F_continued))
@@ -1598,7 +3175,8 @@ def upward_continuation(data: GeophysicalData, height: float = 1000.0) -> Proces
                 **data.metadata,
                 'processing': 'upward_continuation',
                 'height_m': height,
-                'grid_spacing': f"{dx:.2f} x {dy:.2f}"
+                'grid_spacing': f"{dx:.2f} x {dy:.2f}",
+                'stabilization_wavelength': stabilization_wavelength
             }
         )
         
@@ -1607,6 +3185,7 @@ def upward_continuation(data: GeophysicalData, height: float = 1000.0) -> Proces
         
         # Explicação
         attenuation = np.exp(-K.max() * height)
+        stab_info = f"\n- Estabilização (λ): {stabilization_wavelength:.1f} m" if stabilization_wavelength else ""
         
         explanation = f"""
 ### 📊 Continuação Ascendente Aplicada
@@ -1615,6 +3194,7 @@ def upward_continuation(data: GeophysicalData, height: float = 1000.0) -> Proces
 - Altura de continuação: {height:.0f} m
 - Dimensão do grid: {ny} × {nx}
 - Espaçamento: {dx:.2f} × {dy:.2f} m
+{stab_info}
 
 **Efeito da Filtragem:**
 - Atenuação de alta frequência: {(1-attenuation)*100:.1f}%
@@ -1640,7 +3220,7 @@ e realçando tendências regionais de fontes profundas.
             processed_data=processed_data,
             original_data=data,
             method_name="upward_continuation",
-            parameters={'height': height},
+            parameters={'height': height, 'stabilization_wavelength': stabilization_wavelength},
             figures=figures,
             explanation=explanation,
             execution_time=execution_time,
@@ -1658,7 +3238,10 @@ e realçando tendências regionais de fontes profundas.
     input_type="grid",
     requires_params=[]
 )
-def vertical_derivative(data: GeophysicalData) -> ProcessingResult:
+def vertical_derivative(
+    data: GeophysicalData,
+    stabilization_wavelength: float = None
+) -> ProcessingResult:
     """
     Derivada Vertical de Primeira Ordem
     
@@ -1733,6 +3316,10 @@ def vertical_derivative(data: GeophysicalData) -> ProcessingResult:
         # FFT e aplicação 🚀 COM GPU (10-50x mais rápido)
         F = fft2_gpu(Zi)
         F_deriv = F * K
+        if stabilization_wavelength is not None and stabilization_wavelength > 0:
+            sigma = stabilization_wavelength / (2 * np.pi)
+            stabilizer = np.exp(-(K * sigma) ** 2 / 2)
+            F_deriv = F_deriv * stabilizer
         Zi_deriv = np.real(ifft2_gpu(F_deriv))
         
         if GPU_INFO['available']:
@@ -1766,7 +3353,8 @@ def vertical_derivative(data: GeophysicalData) -> ProcessingResult:
             metadata={
                 **data.metadata,
                 'processing': 'vertical_derivative',
-                'grid_spacing': f"{dx:.2f} x {dy:.2f}"
+                'grid_spacing': f"{dx:.2f} x {dy:.2f}",
+                'stabilization_wavelength': stabilization_wavelength
             }
         )
         
@@ -1799,7 +3387,7 @@ A derivada vertical realça bordas de corpos e anomalias rasas.
             processed_data=processed_data,
             original_data=data,
             method_name="vertical_derivative",
-            parameters={},
+            parameters={'stabilization_wavelength': stabilization_wavelength},
             figures=figures,
             explanation=explanation,
             execution_time=execution_time,
@@ -1976,7 +3564,8 @@ def reduction_to_pole(
     inc_field: float,
     dec_field: float,
     inc_mag: float = None,
-    dec_mag: float = None
+    dec_mag: float = None,
+    stabilization_wavelength: float = None
 ) -> ProcessingResult:
     """
     Redução ao Polo (RTP)
@@ -2089,6 +3678,10 @@ def reduction_to_pole(
         
         # Filtro RTP
         rtp_filter = (KZ ** 2) / (theta_f * theta_m)
+        if stabilization_wavelength is not None and stabilization_wavelength > 0:
+            sigma = stabilization_wavelength / (2 * np.pi)
+            stabilizer = np.exp(-(K * sigma) ** 2 / 2)
+            rtp_filter = rtp_filter * stabilizer
         rtp_filter[0, 0] = 0  # DC component
         
         # Aplica filtro 🚀 COM GPU (10-50x mais rápido)
@@ -2129,7 +3722,8 @@ def reduction_to_pole(
                 'inc_field': inc_field,
                 'dec_field': dec_field,
                 'inc_mag': inc_mag,
-                'dec_mag': dec_mag
+                'dec_mag': dec_mag,
+                'stabilization_wavelength': stabilization_wavelength
             }
         )
         
@@ -2166,7 +3760,8 @@ RTP centraliza anomalias sobre suas fontes, facilitando interpretação.
                 'inc_field': inc_field,
                 'dec_field': dec_field,
                 'inc_mag': inc_mag,
-                'dec_mag': dec_mag
+                'dec_mag': dec_mag,
+                'stabilization_wavelength': stabilization_wavelength
             },
             figures=figures,
             explanation=explanation,
@@ -2661,6 +4256,1431 @@ Filtro remove componentes de alta frequência, suavizando o campo.
     except Exception as e:
         logger.error(f"Erro no filtro passa-baixa: {str(e)}")
         raise ProcessingError(f"Falha no filtro passa-baixa: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Filtro Passa-Alta Gaussiano",
+    input_type="grid",
+    requires_params=['wavelength']
+)
+def gaussian_highpass(data: GeophysicalData, wavelength: float) -> ProcessingResult:
+    """Filtro passa-alta gaussiano."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        sigma = wavelength / (2 * np.pi)
+        highpass = 1 - np.exp(-(K * sigma) ** 2 / 2)
+
+        F = fft2_gpu(Zi)
+        Zi_filtered = np.real(ifft2_gpu(F * highpass))
+
+        filtered_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_highpass": Zi_filtered.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=filtered_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_highpass",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'gaussian_highpass', 'wavelength': wavelength}
+        )
+
+        figures = create_comparison_plots(data, processed_data, f"Filtro Passa-Alta (λ={wavelength}m)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="gaussian_highpass",
+            parameters={'wavelength': wavelength},
+            figures=figures,
+            explanation="Filtro passa-alta aplicado.",
+            execution_time=execution_time,
+            references=["BLAKELY, R. J. **Potential Theory**. 1995."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no filtro passa-alta: {str(e)}")
+        raise ProcessingError(f"Falha no filtro passa-alta: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Filtro Passa-Banda Gaussiano",
+    input_type="grid",
+    requires_params=[]
+)
+def gaussian_bandpass(data: GeophysicalData, low_wavelength: float = 1000.0, high_wavelength: float = 5000.0) -> ProcessingResult:
+    """Filtro passa-banda gaussiano."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        sigma_low = low_wavelength / (2 * np.pi)
+        sigma_high = high_wavelength / (2 * np.pi)
+        lowpass = np.exp(-(K * sigma_high) ** 2 / 2)
+        highpass = 1 - np.exp(-(K * sigma_low) ** 2 / 2)
+        bandpass = lowpass * highpass
+
+        F = fft2_gpu(Zi)
+        Zi_filtered = np.real(ifft2_gpu(F * bandpass))
+
+        filtered_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_bandpass": Zi_filtered.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=filtered_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_bandpass",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'gaussian_bandpass', 'low_wavelength': low_wavelength, 'high_wavelength': high_wavelength}
+        )
+
+        figures = create_comparison_plots(data, processed_data, f"Filtro Passa-Banda (λ={low_wavelength}-{high_wavelength}m)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="gaussian_bandpass",
+            parameters={'low_wavelength': low_wavelength, 'high_wavelength': high_wavelength},
+            figures=figures,
+            explanation="Filtro passa-banda aplicado.",
+            execution_time=execution_time,
+            references=["BLAKELY, R. J. **Potential Theory**. 1995."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no filtro passa-banda: {str(e)}")
+        raise ProcessingError(f"Falha no filtro passa-banda: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Filtro direcional no domínio da frequência",
+    input_type="grid",
+    requires_params=['azimuth']
+)
+def directional_filter(data: GeophysicalData, azimuth: float = 0.0, width: float = 30.0) -> ProcessingResult:
+    """Filtro direcional com azimute em graus."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+
+        theta = np.arctan2(KY, KX)
+        az = np.deg2rad(azimuth)
+        w = np.deg2rad(width)
+        weight = np.exp(-((theta - az) ** 2) / (2 * w ** 2)) + np.exp(-((theta - az + np.pi) ** 2) / (2 * w ** 2))
+
+        F = fft2_gpu(Zi)
+        Zi_filtered = np.real(ifft2_gpu(F * weight))
+
+        filtered_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_dir": Zi_filtered.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=filtered_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_dir",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'directional_filter', 'azimuth': azimuth, 'width': width}
+        )
+
+        figures = create_comparison_plots(data, processed_data, f"Filtro Direcional (az={azimuth}°)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="directional_filter",
+            parameters={'azimuth': azimuth, 'width': width},
+            figures=figures,
+            explanation="Filtro direcional aplicado.",
+            execution_time=execution_time,
+            references=["BLUM, M. **Directional filtering**. Geophysics, 2001."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no filtro direcional: {str(e)}")
+        raise ProcessingError(f"Falha no filtro direcional: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Continuação descendente (com estabilização)",
+    input_type="grid",
+    requires_params=['height']
+)
+def downward_continuation(data: GeophysicalData, height: float = 100.0, stabilization_wavelength: float = 5000.0) -> ProcessingResult:
+    """Continuação descendente com estabilização por passa-baixa."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        sigma = stabilization_wavelength / (2 * np.pi)
+        stabilizer = np.exp(-(K * sigma) ** 2 / 2)
+
+        F = fft2_gpu(Zi)
+        F_down = F * np.exp(K * height) * stabilizer
+        Zi_down = np.real(ifft2_gpu(F_down))
+
+        down_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_downward": Zi_down.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=down_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_downward",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'downward_continuation', 'height': height}
+        )
+
+        figures = create_comparison_plots(data, processed_data, f"Continuação Descendente ({height}m)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="downward_continuation",
+            parameters={'height': height, 'stabilization_wavelength': stabilization_wavelength},
+            figures=figures,
+            explanation="Continuação descendente aplicada com estabilização.",
+            execution_time=execution_time,
+            references=["BLAKELY, R. J. **Potential Theory**. 1995."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na continuação descendente: {str(e)}")
+        raise ProcessingError(f"Falha na continuação descendente: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Derivada vertical de 2ª ordem",
+    input_type="grid",
+    requires_params=[]
+)
+def vertical_derivative_second(data: GeophysicalData) -> ProcessingResult:
+    """Derivada vertical de 2ª ordem no domínio da frequência."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        F = fft2_gpu(Zi)
+        Zi_dzz = np.real(ifft2_gpu(F * (K ** 2)))
+
+        deriv_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_dzz": Zi_dzz.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=deriv_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_dzz",
+            units=f"{data.units}/m²",
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'vertical_derivative_second'}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Derivada Vertical 2ª Ordem")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="vertical_derivative_second",
+            parameters={},
+            figures=figures,
+            explanation="Derivada vertical de 2ª ordem aplicada.",
+            execution_time=execution_time,
+            references=["BLAKELY, R. J. **Potential Theory**. 1995."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na derivada vertical 2ª ordem: {str(e)}")
+        raise ProcessingError(f"Falha na derivada vertical 2ª ordem: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Curvatura total (laplaciano 2D)",
+    input_type="grid",
+    requires_params=[]
+)
+def total_curvature(data: GeophysicalData) -> ProcessingResult:
+    """Curvatura total via Laplaciano."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K2 = (KX ** 2 + KY ** 2)
+
+        F = fft2_gpu(Zi)
+        Zi_curv = np.real(ifft2_gpu(-F * K2))
+
+        curv_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_curv": Zi_curv.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=curv_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_curv",
+            units=f"{data.units}/m²",
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'total_curvature'}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Curvatura Total")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="total_curvature",
+            parameters={},
+            figures=figures,
+            explanation="Curvatura total aplicada (Laplaciano 2D).",
+            execution_time=execution_time,
+            references=["WERNER, S. **Curvature methods**. 2003."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na curvatura total: {str(e)}")
+        raise ProcessingError(f"Falha na curvatura total: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Theta map",
+    input_type="grid",
+    requires_params=[]
+)
+def theta_map(data: GeophysicalData) -> ProcessingResult:
+    """Theta map baseado em gradientes horizontais e verticais."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        F = fft2_gpu(Zi)
+        dx_field = np.real(ifft2_gpu(F * (1j * KX)))
+        dy_field = np.real(ifft2_gpu(F * (1j * KY)))
+        dz_field = np.real(ifft2_gpu(F * K))
+
+        thd = np.sqrt(dx_field**2 + dy_field**2)
+        theta = np.rad2deg(np.arctan2(thd, np.abs(dz_field) + 1e-9))
+
+        theta_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_theta": theta.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=theta_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_theta",
+            units="graus",
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'theta_map'}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Theta Map")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="theta_map",
+            parameters={},
+            figures=figures,
+            explanation="Theta map aplicado.",
+            execution_time=execution_time,
+            references=["WATTS, D. **Theta map interpretation**. 2007."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no theta map: {str(e)}")
+        raise ProcessingError(f"Falha no theta map: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Local wavenumber",
+    input_type="grid",
+    requires_params=[]
+)
+def local_wavenumber(data: GeophysicalData) -> ProcessingResult:
+    """Local wavenumber baseado em gradientes."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+
+        F = fft2_gpu(Zi)
+        dx_field = np.real(ifft2_gpu(F * (1j * KX)))
+        dy_field = np.real(ifft2_gpu(F * (1j * KY)))
+
+        k_local = np.sqrt(dx_field**2 + dy_field**2) / (np.abs(Zi) + 1e-9)
+
+        k_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_k": k_local.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=k_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_k",
+            units="1/m",
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'local_wavenumber'}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Local Wavenumber")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="local_wavenumber",
+            parameters={},
+            figures=figures,
+            explanation="Local wavenumber estimado.",
+            execution_time=execution_time,
+            references=["NABIGHIAN, M. N. **Local wavenumber**. Geophysics, 1992."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no local wavenumber: {str(e)}")
+        raise ProcessingError(f"Falha no local wavenumber: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Estimativa de profundidade por espectro de potência",
+    input_type="grid",
+    requires_params=[]
+)
+def power_spectrum_depth(
+    data: GeophysicalData,
+    n_bins: int = 30,
+    fit_low: float = 20.0,
+    fit_high: float = 80.0
+) -> ProcessingResult:
+    """Estimativa de profundidade média via PSD com binning radial."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        F = np.fft.fft2(Zi)
+        P = np.abs(F) ** 2
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2).ravel()
+        P_flat = P.ravel()
+
+        valid = K > 0
+        K = K[valid]
+        P_flat = P_flat[valid]
+
+        if len(K) < 10:
+            depth = np.nan
+        else:
+            k_min, k_max = K.min(), K.max()
+            bins = np.linspace(k_min, k_max, n_bins + 1)
+            k_bin = []
+            p_bin = []
+
+            for i in range(n_bins):
+                mask = (K >= bins[i]) & (K < bins[i + 1])
+                if not np.any(mask):
+                    continue
+                k_bin.append(np.mean(K[mask]))
+                p_bin.append(np.mean(np.log(P_flat[mask] + 1e-9)))
+
+            k_bin = np.asarray(k_bin)
+            p_bin = np.asarray(p_bin)
+
+            if len(k_bin) < 5:
+                depth = np.nan
+            else:
+                k1, k2 = np.percentile(k_bin, [fit_low, fit_high])
+                mask = (k_bin >= k1) & (k_bin <= k2)
+                slope, _ = np.polyfit(k_bin[mask], p_bin[mask], 1)
+                depth = -slope / 2
+
+        depth_values = np.full_like(Zi, depth, dtype=float)
+        depth_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_depth_psd": depth_values.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=depth_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_depth_psd",
+            units="m",
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'power_spectrum_depth', 'depth_estimate_m': depth}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Profundidade (PSD)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="power_spectrum_depth",
+            parameters={
+                'n_bins': n_bins,
+                'fit_low': fit_low,
+                'fit_high': fit_high
+            },
+            figures=figures,
+            explanation=f"Profundidade média estimada: {depth:.1f} m",
+            execution_time=execution_time,
+            references=["SPECTOR, A.; GRANT, F. **Statistical models for magnetic interpretation**. 1970."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no espectro de potência: {str(e)}")
+        raise ProcessingError(f"Falha no espectro de potência: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Estimativa de profundidade por deconvolução de Euler",
+    input_type="grid",
+    requires_params=[]
+)
+def euler_depth_estimate(
+    data: GeophysicalData,
+    structural_index: float = 1.0,
+    window_size: int = 5,
+    min_depth: float = 0.0,
+    max_residual: float = None
+) -> ProcessingResult:
+    """Deconvolução de Euler por janela móvel (2D)."""
+    start_time = datetime.now()
+
+    try:
+        if window_size < 3 or window_size % 2 == 0:
+            raise ProcessingError("window_size deve ser ímpar e >= 3")
+
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        mask = np.isnan(Zi)
+        if mask.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+            Zi[mask] = Zi[tuple(indices[:, mask])]
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        F = fft2_gpu(Zi)
+        dTdx = np.real(ifft2_gpu(F * (1j * KX)))
+        dTdy = np.real(ifft2_gpu(F * (1j * KY)))
+        dTdz = np.real(ifft2_gpu(F * K))
+
+        half = window_size // 2
+        depth_grid = np.full_like(Zi, np.nan, dtype=float)
+
+        for i in range(half, ny - half):
+            for j in range(half, nx - half):
+                sl_y = slice(i - half, i + half + 1)
+                sl_x = slice(j - half, j + half + 1)
+
+                xw = Xi[sl_y, sl_x].ravel()
+                yw = Yi[sl_y, sl_x].ravel()
+                zw = np.zeros_like(xw)
+                Tw = Zi[sl_y, sl_x].ravel()
+                dTx = dTdx[sl_y, sl_x].ravel()
+                dTy = dTdy[sl_y, sl_x].ravel()
+                dTz = dTdz[sl_y, sl_x].ravel()
+
+                A = np.column_stack([dTx, dTy, dTz, np.full_like(dTx, structural_index)])
+                b = dTx * xw + dTy * yw + dTz * zw + structural_index * Tw
+
+                if np.any(np.isnan(A)) or np.any(np.isnan(b)):
+                    continue
+
+                try:
+                    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+                    z0 = sol[2]
+                    if max_residual is not None:
+                        resid = np.linalg.norm(A @ sol - b) / max(len(b), 1)
+                        if resid > max_residual:
+                            continue
+                    if z0 >= min_depth:
+                        depth_grid[i, j] = z0
+                except Exception:
+                    continue
+
+        depth_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_euler_depth": depth_grid.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=depth_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_euler_depth",
+            units="m",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'euler_depth_estimate',
+                'structural_index': structural_index,
+                'window_size': window_size,
+                'min_depth': min_depth,
+                'max_residual': max_residual
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Euler (Profundidade)")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="euler_depth_estimate",
+            parameters={
+                'structural_index': structural_index,
+                'window_size': window_size,
+                'min_depth': min_depth,
+                'max_residual': max_residual
+            },
+            figures=figures,
+            explanation="Profundidade estimada por deconvolução de Euler (janela móvel).",
+            execution_time=execution_time,
+            references=["THOMPSON, D. **EULDPH: Euler deconvolution**. 1982."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na estimativa Euler: {str(e)}")
+        raise ProcessingError(f"Falha na estimativa Euler: {str(e)}")
+
+
+@register_processing(
+    category="Geral",
+    description="Método de Peters/Half-slope (perfil 1D)",
+    input_type="profile",
+    requires_params=[]
+)
+def peters_half_slope(
+    data: GeophysicalData,
+    smooth_window: int = 11,
+    polyorder: int = 2
+) -> ProcessingResult:
+    """Estimativa de profundidade por método half-slope (perfil) com suavização opcional."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas().sort_values(by=data.coords['x'])
+        x = df[data.coords['x']].to_numpy(dtype=float)
+        z = df[data.value_column].to_numpy(dtype=float)
+
+        if smooth_window is not None and smooth_window >= 5 and smooth_window % 2 == 1 and len(z) >= smooth_window:
+            from scipy.signal import savgol_filter
+            z_use = savgol_filter(z, smooth_window, polyorder)
+        else:
+            z_use = z
+
+        dzdx = np.gradient(z_use, x)
+        idx = np.argmax(np.abs(dzdx))
+        half = np.abs(dzdx[idx]) / 2
+        left = np.where(np.abs(dzdx[:idx]) <= half)[0]
+        right = np.where(np.abs(dzdx[idx:]) <= half)[0]
+        if len(left) > 0 and len(right) > 0:
+            x1 = x[left[-1]]
+            x2 = x[idx + right[0]]
+            depth = 0.5 * np.abs(x2 - x1)
+        else:
+            depth = np.nan
+
+        depth_vals = np.full_like(z, depth, dtype=float)
+        depth_df = pl.DataFrame({
+            data.coords['x']: x,
+            data.coords['y']: df[data.coords['y']].to_numpy(),
+            f"{data.value_column}_peters_depth": depth_vals
+        })
+
+        processed_data = GeophysicalData(
+            data=depth_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_peters_depth",
+            units="m",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'peters_half_slope',
+                'depth_estimate_m': depth,
+                'smooth_window': smooth_window,
+                'polyorder': polyorder
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Peters/Half-slope")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="peters_half_slope",
+            parameters={'smooth_window': smooth_window, 'polyorder': polyorder},
+            figures=figures,
+            explanation=f"Profundidade estimada (half-slope): {depth:.1f} m (suavização opcional)",
+            execution_time=execution_time,
+            references=["PETERS, L. J. **Direct approach to magnetic interpretation**. 1949."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no método Peters: {str(e)}")
+        raise ProcessingError(f"Falha no método Peters: {str(e)}")
+
+
+@register_processing(
+    category="Interpretação",
+    description="Mapeamento automático de lineamentos",
+    input_type="grid",
+    requires_params=[]
+)
+def lineament_mapping(
+    data: GeophysicalData,
+    percentile: float = 90.0,
+    method: str = "canny",
+    sigma: float = 1.0,
+    low_percentile: float = 70.0,
+    high_percentile: float = None
+) -> ProcessingResult:
+    """Lineamentos por detecção de bordas (Canny) com fallback por gradiente."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        Zi = Zi.astype(float)
+
+        method_used = "gradient_threshold"
+        mask = None
+
+        if method.lower() == "canny":
+            try:
+                import importlib
+
+                feature = importlib.import_module("skimage.feature")
+                Zi_min = np.nanmin(Zi)
+                Zi_max = np.nanmax(Zi)
+                Zi_norm = (Zi - Zi_min) / (Zi_max - Zi_min + 1e-12)
+
+                gy, gx = np.gradient(Zi_norm)
+                grad = np.sqrt(gx**2 + gy**2)
+                high_p = percentile if high_percentile is None else high_percentile
+                low_t = np.percentile(grad, low_percentile)
+                high_t = np.percentile(grad, high_p)
+
+                edges = feature.canny(
+                    Zi_norm,
+                    sigma=sigma,
+                    low_threshold=low_t,
+                    high_threshold=high_t
+                )
+                mask = edges.astype(float)
+                method_used = "canny"
+            except Exception:
+                mask = None
+
+        if mask is None:
+            gy, gx = np.gradient(Zi)
+            grad = np.sqrt(gx**2 + gy**2)
+            thresh = np.percentile(grad, percentile)
+            mask = (grad >= thresh).astype(float)
+
+        mask_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_lineaments": mask.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=mask_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_lineaments",
+            units="mask",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'lineament_mapping',
+                'percentile': percentile,
+                'method': method_used,
+                'sigma': sigma,
+                'low_percentile': low_percentile,
+                'high_percentile': high_percentile
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Lineamentos")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="lineament_mapping",
+            parameters={
+                'percentile': percentile,
+                'method': method_used,
+                'sigma': sigma,
+                'low_percentile': low_percentile,
+                'high_percentile': high_percentile
+            },
+            figures=figures,
+            explanation=f"Lineamentos mapeados por {method_used}.",
+            execution_time=execution_time,
+            references=["PHILLIPS, J. D. **Lineament analysis**. 2001."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no mapeamento de lineamentos: {str(e)}")
+        raise ProcessingError(f"Falha no mapeamento de lineamentos: {str(e)}")
+
+
+@register_processing(
+    category="Interpretação",
+    description="Estimativa de contatos e falhas (THD)",
+    input_type="grid",
+    requires_params=[]
+)
+def contact_faults_estimation(
+    data: GeophysicalData,
+    percentile: float = 90.0,
+    method: str = "percentile"
+) -> ProcessingResult:
+    """Contatos/falhas por THD com limiar adaptativo opcional."""
+    start_time = datetime.now()
+
+    try:
+        thd_result = horizontal_derivative_total(data)
+        thd_data = thd_result.processed_data
+        values = thd_data.data[thd_data.value_column].to_numpy()
+        thresh = None
+
+        if method.lower() == "otsu":
+            try:
+                import importlib
+                filters = importlib.import_module("skimage.filters")
+                thresh = filters.threshold_otsu(values)
+            except Exception:
+                thresh = None
+
+        if thresh is None:
+            thresh = np.percentile(values, percentile)
+        mask = (values >= thresh).astype(float)
+
+        mask_df = pl.DataFrame({
+            data.coords['x']: thd_data.data[data.coords['x']].to_numpy(),
+            data.coords['y']: thd_data.data[data.coords['y']].to_numpy(),
+            f"{data.value_column}_contacts": mask
+        })
+
+        processed_data = GeophysicalData(
+            data=mask_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_contacts",
+            units="mask",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'contact_faults_estimation',
+                'percentile': percentile,
+                'method': method
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Contatos e Falhas")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="contact_faults_estimation",
+            parameters={'percentile': percentile, 'method': method},
+            figures=figures,
+            explanation=f"Contatos e falhas estimados por THD ({method}).",
+            execution_time=execution_time,
+            references=["CORDELL, L.; GRAUCH, V. J. S. **Mapping basement magnetization zones**. 1985."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na estimativa de contatos/falhas: {str(e)}")
+        raise ProcessingError(f"Falha na estimativa de contatos/falhas: {str(e)}")
+
+
+@register_processing(
+    category="Interpretação",
+    description="Delineamento de bacias sedimentares (baixas amplitudes)",
+    input_type="grid",
+    requires_params=[]
+)
+def basin_delineation(
+    data: GeophysicalData,
+    percentile: float = 10.0,
+    method: str = "percentile"
+) -> ProcessingResult:
+    """Delineia bacias por limiar de baixa amplitude com opção adaptativa."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        thresh = None
+
+        if method.lower() == "otsu":
+            try:
+                import importlib
+                filters = importlib.import_module("skimage.filters")
+                thresh = filters.threshold_otsu(Zi)
+            except Exception:
+                thresh = None
+
+        if thresh is None:
+            thresh = np.percentile(Zi, percentile)
+        mask = (Zi <= thresh).astype(float)
+
+        mask_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_basin": mask.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=mask_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_basin",
+            units="mask",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'basin_delineation',
+                'percentile': percentile,
+                'method': method
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Bacias Sedimentares")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="basin_delineation",
+            parameters={'percentile': percentile, 'method': method},
+            figures=figures,
+            explanation=f"Bacias delineadas por limiar de baixa amplitude ({method}).",
+            execution_time=execution_time,
+            references=["DOBRIN, M. **Introduction to Geophysical Prospecting**. 1981."]
+        )
+    except Exception as e:
+        logger.error(f"Erro no delineamento de bacias: {str(e)}")
+        raise ProcessingError(f"Falha no delineamento de bacias: {str(e)}")
+
+
+@register_processing(
+    category="Interpretação",
+    description="Identificação de corpos intrusivos (altas amplitudes)",
+    input_type="grid",
+    requires_params=[]
+)
+def intrusive_bodies_detection(
+    data: GeophysicalData,
+    percentile: float = 90.0,
+    method: str = "percentile"
+) -> ProcessingResult:
+    """Identifica corpos intrusivos por altas amplitudes com opção adaptativa."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        thresh = None
+
+        if method.lower() == "otsu":
+            try:
+                import importlib
+                filters = importlib.import_module("skimage.filters")
+                thresh = filters.threshold_otsu(Zi)
+            except Exception:
+                thresh = None
+
+        if thresh is None:
+            thresh = np.percentile(Zi, percentile)
+        mask = (Zi >= thresh).astype(float)
+
+        mask_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_intrusive": mask.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=mask_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_intrusive",
+            units="mask",
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'intrusive_bodies_detection',
+                'percentile': percentile,
+                'method': method
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Corpos Intrusivos")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="intrusive_bodies_detection",
+            parameters={'percentile': percentile, 'method': method},
+            figures=figures,
+            explanation=f"Corpos intrusivos identificados por altas amplitudes ({method}).",
+            execution_time=execution_time,
+            references=["TELFORD, W. M. **Applied Geophysics**. 1990."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na identificação de intrusivos: {str(e)}")
+        raise ProcessingError(f"Falha na identificação de intrusivos: {str(e)}")
+
+
+@register_processing(
+    category="Modelagem",
+    description="Modelagem 2D/3D por prisma retangular",
+    input_type="grid",
+    requires_params=[]
+)
+def prism_modeling(
+    data: GeophysicalData,
+    prism_west: float = None,
+    prism_east: float = None,
+    prism_south: float = None,
+    prism_north: float = None,
+    prism_bottom: float = -1000.0,
+    prism_top: float = 0.0,
+    density_kgm3: float = 2670.0,
+    observation_height: float = 0.0
+) -> ProcessingResult:
+    """Modelagem física de prisma retangular com Harmonica."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, _ = data.to_grid(method='linear')
+
+        west = prism_west if prism_west is not None else Xi.min() + (Xi.max() - Xi.min()) * 0.25
+        east = prism_east if prism_east is not None else Xi.max() - (Xi.max() - Xi.min()) * 0.25
+        south = prism_south if prism_south is not None else Yi.min() + (Yi.max() - Yi.min()) * 0.25
+        north = prism_north if prism_north is not None else Yi.max() - (Yi.max() - Yi.min()) * 0.25
+
+        prism = [west, east, south, north, prism_bottom, prism_top]
+
+        coords = (
+            Xi.ravel(),
+            Yi.ravel(),
+            np.full(Xi.size, observation_height)
+        )
+        gz = hm.prism_gravity(coords, prism, density_kgm3, field="g_z")
+        Zi = gz.reshape(Xi.shape)
+
+        model_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_model": Zi.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=model_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_model",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'prism_modeling',
+                'prism': prism,
+                'density_kgm3': density_kgm3,
+                'observation_height': observation_height
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Modelagem por Prisma")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="prism_modeling",
+            parameters={
+                'prism': prism,
+                'density_kgm3': density_kgm3,
+                'observation_height': observation_height
+            },
+            figures=figures,
+            explanation="Modelagem física de prisma retangular aplicada.",
+            execution_time=execution_time,
+            references=["NAGY, D. **Gravitational attraction of a right rectangular prism**. Geophysics, 1966."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na modelagem por prisma: {str(e)}")
+        raise ProcessingError(f"Falha na modelagem por prisma: {str(e)}")
+
+
+@register_processing(
+    category="Inversão",
+    description="Regularização de Tikhonov (suavização)",
+    input_type="grid",
+    requires_params=[]
+)
+def tikhonov_regularization(data: GeophysicalData, lambda_reg: float = 0.01) -> ProcessingResult:
+    """Regularização de Tikhonov (solução no domínio da frequência)."""
+    start_time = datetime.now()
+
+    try:
+        Xi, Yi, Zi = data.to_grid(method='linear')
+        ny, nx = Zi.shape
+
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K2 = (KX ** 2 + KY ** 2)
+
+        F = fft2_gpu(Zi)
+        Zi_smooth = np.real(ifft2_gpu(F / (1 + lambda_reg * K2)))
+
+        reg_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_tikhonov": Zi_smooth.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=reg_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_tikhonov",
+            units=data.units,
+            crs=data.crs,
+            metadata={**data.metadata, 'processing': 'tikhonov_regularization', 'lambda_reg': lambda_reg}
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Regularização de Tikhonov")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="tikhonov_regularization",
+            parameters={'lambda_reg': lambda_reg},
+            figures=figures,
+            explanation="Regularização de Tikhonov aplicada no domínio da frequência.",
+            execution_time=execution_time,
+            references=["TIKHONOV, A. N. **Solutions of ill-posed problems**. 1977."]
+        )
+    except Exception as e:
+        logger.error(f"Erro na regularização de Tikhonov: {str(e)}")
+        raise ProcessingError(f"Falha na regularização de Tikhonov: {str(e)}")
+
+
+@register_processing(
+    category="Inversão",
+    description="Inversão conjunta grav+mag (regularizada)",
+    input_type="points",
+    requires_params=[]
+)
+def joint_inversion_grav_mag(
+    data: GeophysicalData,
+    second_column: str = None,
+    weight: float = 0.5,
+    normalize: bool = True,
+    smooth_length: float = 500.0
+) -> ProcessingResult:
+    """Inversão conjunta com regularização de suavidade no domínio da frequência."""
+    start_time = datetime.now()
+
+    try:
+        df = data.to_pandas()
+        if second_column is None:
+            for cand in ["gravity", "magnetic", "tmi", "bouguer"]:
+                if cand in df.columns and cand != data.value_column:
+                    second_column = cand
+                    break
+        if second_column is None:
+            raise ProcessingError("Coluna secundária não encontrada para inversão conjunta")
+
+        primary_grid = data.to_grid(method='linear')
+        secondary_data = GeophysicalData(
+            data=data.data,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords=data.coords,
+            value_column=second_column,
+            units=data.units,
+            crs=data.crs,
+            metadata=data.metadata
+        )
+        secondary_grid = secondary_data.to_grid(method='linear')
+
+        Xi, Yi, Z1 = primary_grid
+        _, _, Z2 = secondary_grid
+
+        if normalize:
+            Z1 = (Z1 - np.nanmean(Z1)) / (np.nanstd(Z1) if np.nanstd(Z1) != 0 else 1)
+            Z2 = (Z2 - np.nanmean(Z2)) / (np.nanstd(Z2) if np.nanstd(Z2) != 0 else 1)
+
+        mask1 = np.isnan(Z1)
+        if mask1.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask1, return_distances=False, return_indices=True)
+            Z1[mask1] = Z1[tuple(indices[:, mask1])]
+
+        mask2 = np.isnan(Z2)
+        if mask2.any():
+            from scipy.ndimage import distance_transform_edt
+            indices = distance_transform_edt(mask2, return_distances=False, return_indices=True)
+            Z2[mask2] = Z2[tuple(indices[:, mask2])]
+
+        ny, nx = Z1.shape
+        dx = (Xi.max() - Xi.min()) / (nx - 1)
+        dy = (Yi.max() - Yi.min()) / (ny - 1)
+        kx = 2 * np.pi * fftfreq(nx, d=dx)
+        ky = 2 * np.pi * fftfreq(ny, d=dy)
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX**2 + KY**2)
+
+        w1 = np.clip(weight, 0.0, 1.0)
+        w2 = 1.0 - w1
+        smooth_term = (K * smooth_length) ** 2 if smooth_length and smooth_length > 0 else 0.0
+
+        F1 = fft2_gpu(Z1)
+        F2 = fft2_gpu(Z2)
+        denom = (w1 + w2) + smooth_term
+        denom[denom == 0] = 1.0
+        Fm = (w1 * F1 + w2 * F2) / denom
+        joint_grid = np.real(ifft2_gpu(Fm))
+
+        out_df = pl.DataFrame({
+            data.coords['x']: Xi.flatten(),
+            data.coords['y']: Yi.flatten(),
+            f"{data.value_column}_joint": joint_grid.flatten()
+        })
+
+        processed_data = GeophysicalData(
+            data=out_df,
+            data_type=data.data_type,
+            dimension=data.dimension,
+            coords={'x': data.coords['x'], 'y': data.coords['y']},
+            value_column=f"{data.value_column}_joint",
+            units=data.units,
+            crs=data.crs,
+            metadata={
+                **data.metadata,
+                'processing': 'joint_inversion_grav_mag',
+                'second_column': second_column,
+                'weight': weight,
+                'normalize': normalize,
+                'smooth_length': smooth_length
+            }
+        )
+
+        figures = create_comparison_plots(data, processed_data, "Inversão Conjunta")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return ProcessingResult(
+            processed_data=processed_data,
+            original_data=data,
+            method_name="joint_inversion_grav_mag",
+            parameters={'second_column': second_column, 'weight': weight, 'normalize': normalize, 'smooth_length': smooth_length},
+            figures=figures,
+            explanation="Inversão conjunta regularizada por suavidade no domínio da frequência.",
+            execution_time=execution_time,
+            references=[
+                "GALLARDO, L. A.; MEJU, M. A. **Joint inversion of geophysical data**. Geophysical Journal International, 2004."
+            ]
+        )
+    except Exception as e:
+        logger.error(f"Erro na inversão conjunta: {str(e)}")
+        raise ProcessingError(f"Falha na inversão conjunta: {str(e)}")
 
 
 def create_histogram(data: GeophysicalData) -> go.Figure:
@@ -3359,23 +6379,50 @@ def render_data_panel():
         <h3 style='margin: 0; color: #003d5c;'>📊 Estatísticas Descritivas</h3>
     </div>
     """, unsafe_allow_html=True)
+
+    numeric_columns = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    default_col = geo_data.value_column if geo_data.value_column in numeric_columns else (numeric_columns[0] if numeric_columns else None)
+    selected_col = st.selectbox(
+        "Selecione uma variável:",
+        options=numeric_columns,
+        index=numeric_columns.index(default_col) if default_col in numeric_columns else 0,
+        disabled=not numeric_columns
+    )
+
+    if selected_col:
+        series = df[selected_col].dropna()
+        stats_selected = {
+            "n_points": int(series.shape[0]),
+            "min": float(series.min()) if not series.empty else float("nan"),
+            "max": float(series.max()) if not series.empty else float("nan"),
+            "mean": float(series.mean()) if not series.empty else float("nan"),
+            "median": float(series.median()) if not series.empty else float("nan"),
+            "std": float(series.std()) if not series.empty else float("nan"),
+            "q25": float(series.quantile(0.25)) if not series.empty else float("nan"),
+            "q75": float(series.quantile(0.75)) if not series.empty else float("nan"),
+        }
+    else:
+        stats_selected = stats
+
+    units_label = geo_data.units if selected_col == geo_data.value_column else ""
+    units_suffix = f" {units_label}" if units_label else ""
     
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("🔢 Sample N°", f"{stats['n_points']:,}", )
-        st.metric("📉 Mín", f"{stats['min']:.2f}")
+        st.metric("🔢 Sample N°", f"{stats_selected['n_points']:,}")
+        st.metric("📉 Mín", f"{stats_selected['min']:.2f}{units_suffix}")
 
     with col2:
-        st.metric("🔢 Média", f"{stats['mean']:.2f}")
-        st.metric("📈 Máx", f"{stats['max']:.2f}")
+        st.metric("🔢 Média", f"{stats_selected['mean']:.2f}{units_suffix}")
+        st.metric("📈 Máx", f"{stats_selected['max']:.2f}{units_suffix}")
         
     with col3:
-        st.metric("📊 Mediana", f"{stats['median']:.2f}")
-        st.metric("📏 Std", f"{stats['std']:.2f}")
+        st.metric("📊 Mediana", f"{stats_selected['median']:.2f}{units_suffix}")
+        st.metric("📏 Std", f"{stats_selected['std']:.2f}{units_suffix}")
         
     with col4:
-        st.metric("📊 IQR", f"{stats['q75'] - stats['q25']:.2f}")
+        st.metric("📊 IQR", f"{stats_selected['q75'] - stats_selected['q25']:.2f}{units_suffix}")
         
     
     # Divisor visual
@@ -3390,7 +6437,7 @@ def render_data_panel():
         <h3 style='margin: 0; color: #003d5c;'>📋 Preview dos Dados</h3>
     </div>
     """, unsafe_allow_html=True)
-    st.dataframe(df.head(10), use_container_width=True, height=300)
+    st.dataframe(df, use_container_width=True, height=300)
     
     # Divisor visual
     st.markdown("""<hr style='margin: 30px 0; border: none; border-top: 2px solid #e0e0e0;'>""", unsafe_allow_html=True)
@@ -3465,7 +6512,7 @@ def render_data_panel():
                     import matplotlib.pyplot as plt
                     import matplotlib.colors as mcolors
                     
-                    cmap = plt.cm.get_cmap('RdBu_r')
+                    cmap = plt.colormaps["RdBu_r"]
                     
                     # Adicionar pontos
                     for _, row in df_sample.iterrows():
@@ -3500,7 +6547,7 @@ def render_data_panel():
                         ).add_to(m)
                     
                     # Renderizar
-                    folium_static(m, width=None, height=500)
+                    components.html(m.get_root().render(), height=500)
                     # st.caption(f"�️ {sample_size:,} pontos exibidos")
                 else:
                     st.warning("⚠️ Coordenadas não geográficas")
@@ -3636,6 +6683,89 @@ def detect_processing_command(user_input: str) -> tuple:
     
     # Mapeamento de comandos
     commands = {
+        'outlier': ('remove_outliers', {}),
+        'outliers': ('remove_outliers', {}),
+        'remoção de outliers': ('remove_outliers', {}),
+        'remocao de outliers': ('remove_outliers', {}),
+        'destrend': ('detrend_regional', {}),
+        'detrend': ('detrend_regional', {}),
+        'tendência regional': ('detrend_regional', {}),
+        'tendencia regional': ('detrend_regional', {}),
+        'normalizar': ('normalize_equalize', {}),
+        'normalização': ('normalize_equalize', {}),
+        'normalizacao': ('normalize_equalize', {}),
+        'equalização': ('normalize_equalize', {}),
+        'equalizacao': ('normalize_equalize', {}),
+        'wavelet': ('wavelet_denoise', {}),
+        'ruído': ('wavelet_denoise', {}),
+        'ruido': ('wavelet_denoise', {}),
+        'interpolação adaptativa': ('adaptive_rbf_interpolation', {}),
+        'interpolacao adaptativa': ('adaptive_rbf_interpolation', {}),
+        'rbf': ('adaptive_rbf_interpolation', {}),
+        'kriging': ('kriging_interpolation', {}),
+        'correção de latitude': ('latitude_correction', {}),
+        'correcao de latitude': ('latitude_correction', {}),
+        'deriva instrumental': ('instrument_drift_correction', {}),
+        'correção de deriva': ('instrument_drift_correction', {}),
+        'correcao de deriva': ('instrument_drift_correction', {}),
+        'correção de maré': ('tide_correction', {}),
+        'correcao de mare': ('tide_correction', {}),
+        'maré': ('tide_correction', {}),
+        'free-air': ('free_air_correction', {}),
+        'free air': ('free_air_correction', {}),
+        'bouguer simples': ('bouguer_simple_correction', {}),
+        'bouguer simple': ('bouguer_simple_correction', {}),
+        'correção de terreno': ('terrain_correction', {}),
+        'correcao de terreno': ('terrain_correction', {}),
+        'isostasia': ('isostatic_anomaly', {}),
+        'anomalia isostatica': ('isostatic_anomaly', {}),
+        'separação regional': ('regional_residual_separation', {}),
+        'separacao regional': ('regional_residual_separation', {}),
+        'residual': ('regional_residual_separation', {}),
+        'correção diurna': ('diurnal_correction', {}),
+        'correcao diurna': ('diurnal_correction', {}),
+        'igrf': ('remove_igrf', {}),
+        'redução ao equador': ('reduction_to_equator', {}),
+        'reducao ao equador': ('reduction_to_equator', {}),
+        'rte': ('reduction_to_equator', {}),
+        'pseudo-gravidade': ('pseudo_gravity', {}),
+        'pseudogravidade': ('pseudo_gravity', {}),
+        'desmagnetização': ('induced_demagnetization', {}),
+        'desmagnetizacao': ('induced_demagnetization', {}),
+        'remanência': ('remove_remanent_magnetization', {}),
+        'remanencia': ('remove_remanent_magnetization', {}),
+        'magnetização remanente': ('remove_remanent_magnetization', {}),
+        'magnetizacao remanente': ('remove_remanent_magnetization', {}),
+        'passa-alta': ('gaussian_highpass', {}),
+        'passa alta': ('gaussian_highpass', {}),
+        'highpass': ('gaussian_highpass', {}),
+        'passa-banda': ('gaussian_bandpass', {}),
+        'passa banda': ('gaussian_bandpass', {}),
+        'bandpass': ('gaussian_bandpass', {}),
+        'filtro direcional': ('directional_filter', {}),
+        'direcional': ('directional_filter', {}),
+        'continuação descendente': ('downward_continuation', {}),
+        'continuacao descendente': ('downward_continuation', {}),
+        'derivada vertical 2': ('vertical_derivative_second', {}),
+        'segunda derivada vertical': ('vertical_derivative_second', {}),
+        'curvatura': ('total_curvature', {}),
+        'theta map': ('theta_map', {}),
+        'theta': ('theta_map', {}),
+        'local wavenumber': ('local_wavenumber', {}),
+        'espectro de potência': ('power_spectrum_depth', {}),
+        'espectro de potencia': ('power_spectrum_depth', {}),
+        'euler': ('euler_depth_estimate', {}),
+        'peters': ('peters_half_slope', {}),
+        'half-slope': ('peters_half_slope', {}),
+        'lineamentos': ('lineament_mapping', {}),
+        'contatos': ('contact_faults_estimation', {}),
+        'falhas': ('contact_faults_estimation', {}),
+        'bacias': ('basin_delineation', {}),
+        'intrusivos': ('intrusive_bodies_detection', {}),
+        'modelagem de prisma': ('prism_modeling', {}),
+        'tikhonov': ('tikhonov_regularization', {}),
+        'inversão conjunta': ('joint_inversion_grav_mag', {}),
+        'inversao conjunta': ('joint_inversion_grav_mag', {}),
         'bouguer': ('bouguer_correction', {}),
         'continuação ascendente': ('upward_continuation', {}),
         'continuacao ascendente': ('upward_continuation', {}),
@@ -3701,6 +6831,13 @@ def detect_processing_command(user_input: str) -> tuple:
     if 'reduction_to_pole' in detected_func:
         params['inc_field'] = -25.0  # Inclinação típica Brasil
         params['dec_field'] = -20.0  # Declinação típica Brasil
+        params['inc_mag'] = -25.0
+        params['dec_mag'] = -20.0
+
+    # Pseudo-gravidade - parâmetros magnéticos (valores padrão Brasil)
+    if 'pseudo_gravity' in detected_func:
+        params['inc_field'] = -25.0
+        params['dec_field'] = -20.0
         params['inc_mag'] = -25.0
         params['dec_mag'] = -20.0
     

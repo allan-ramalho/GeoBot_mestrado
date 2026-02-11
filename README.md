@@ -498,35 +498,31 @@ No método detect_processing_command, inclua palavras-chave para a nova função
 - [ ] Retorno é ProcessingResult
 - [ ] Inclui referências científicas
 
-## 9) Catálogo de possibilidades (para implementar)
-
-No momento, todos os itens listados anteriormente já estão implementados.
-
-## 10) Boas práticas de interpretação
+## 9) Boas práticas de interpretação
 
 - **Sempre aplique QC** antes de derivadas
 - **Derivadas amplificam ruído** → use passa-baixa
 - **RTP é instável em baixas latitudes** → prefira ASA/Tilt
 - **Compare mapas antes/depois** para evitar artefatos
 
-## 11) Manutenção e escala
+## 10) Manutenção e escala
 
-### 11.1) Performance
+### 10.1) Performance
 - Use GPU quando disponível
 - Prefira grids regulares para FFT
 - Evite reprocessar dados sem necessidade
 
-### 11.2) RAG escalável
+### 10.2) RAG escalável
 - Supabase com pgvector
 - Use índices ivfflat/hnsw
 - Atualize a base via rag_update.py
 
-### 11.3) Crescimento do projeto
+### 10.3) Crescimento do projeto
 - Separe módulos conforme funções crescem
 - Crie testes unitários para cada processamento
 - Versione os dados e mantenha changelog
 
-## 12) Solução de problemas
+## 11) Solução de problemas
 
 - **RAG não retorna citações:** verifique RAG_BACKEND e PDFs
 - **Supabase não conecta:** confira SUPABASE_URL/KEY
